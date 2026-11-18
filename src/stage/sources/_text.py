@@ -47,7 +47,8 @@ def _drop_tags(text: str) -> str:
         if closing == -1:
             break
         span = closing - opening - 1
-        if 1 <= span <= LONGEST_TAG:
+        starts_tag = text[opening + 1].isalpha() or text[opening + 1] in "/!?"
+        if 1 <= span <= LONGEST_TAG and starts_tag:
             kept.append(text[index:opening])
             index = closing + 1
             closing = text.find(">", index)
