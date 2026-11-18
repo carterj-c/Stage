@@ -1,3 +1,4 @@
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -11,6 +12,7 @@ from stage.domain import (
     RoleCategory,
 )
 from stage.domain.filters import ALL_LEVELS, EVERY_LEVEL, with_default_levels
+from stage.domain.industry import Industry
 from stage.domain.preferences import CHOOSABLE_LEVELS
 
 if TYPE_CHECKING:
@@ -23,6 +25,7 @@ LAST_DAYS_CHOICES: tuple[int, ...] = (7, 14, 30, 0)
 
 FILTER_FIELDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("role", "Role", tuple(value.value for value in RoleCategory if value.value != "hardware")),
+    ("industry", "Industry", tuple(value.value for value in Industry)),
     ("level", "Level", (*(value.value for value in CHOOSABLE_LEVELS), ALL_LEVELS)),
     ("location", "Location", tuple(value.value for value in LocationBucket)),
     ("language", "Language", tuple(value.value for value in Language)),
@@ -48,7 +51,7 @@ def filter_rows(
     ]
     for name, label, options in FILTER_FIELDS:
         for option in options:
-            if option == "unknown":
+            if option == "unknown" and name != "industry":
                 continue
             rows.append((name, option, f"{label}: {option}", state.values.get(name) == option))
     window = state.window_days or 0
@@ -136,6 +139,10 @@ class FilterState:
         for name, value in self.values.items():
             if name == "level" and value == ALL_LEVELS:
                 chosen["levels"] = EVERY_LEVEL
+                continue
+            if name == "industry":
+                with suppress(ValueError):
+                    chosen["industries"] = frozenset({Industry(value)})
                 continue
             enum = _ENUMS.get(name)
             if enum is None:

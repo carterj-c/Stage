@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 
 from stage.domain.enums import UNKNOWN_TERM, JobLevel, LocationBucket, RoleCategory
 from stage.domain.filters import DEFAULT_LEVELS, JobFilters
+from stage.domain.industry import Industry
 from stage.domain.text import unknown_choice
 
 MAX_ABOUT = 2_000
@@ -45,6 +46,7 @@ class Preferences:
     avoid: tuple[ChosenCompany, ...] = ()
     about: str = ""
     levels: tuple[JobLevel, ...] = ()
+    industries: tuple[Industry, ...] = ()
 
     @property
     def is_empty(self) -> bool:
@@ -52,7 +54,14 @@ class Preferences:
 
     @property
     def narrows(self) -> bool:
-        return bool(self.locations or self.roles or self.levels or self.terms or self.avoid)
+        return bool(
+            self.locations
+            or self.roles
+            or self.levels
+            or self.industries
+            or self.terms
+            or self.avoid
+        )
 
     def apply(self, filters: JobFilters) -> JobFilters:
         named = filters.company is None
@@ -61,6 +70,7 @@ class Preferences:
             filters,
             locations=self._locations() if placed else frozenset(),
             roles=self._roles() if filters.role is None else frozenset(),
+            industries=filters.industries or frozenset(self.industries),
             levels=filters.levels if filters.level_chosen else self.shown_levels(),
             terms=self._terms() if filters.term is None else frozenset(),
             avoid_companies=frozenset(e.folded for e in self.avoid) if named else frozenset(),
@@ -78,6 +88,8 @@ class Preferences:
             parts.append(", ".join(role.value for role in self.roles))
         if self.levels and filters.levels == frozenset(self.levels):
             parts.append(", ".join(level.value for level in self.levels))
+        if self.industries and filters.industries == frozenset(self.industries):
+            parts.append(", ".join(value.value for value in self.industries))
         if self.terms and filters.term is None:
             parts.append(", ".join(self.terms))
         if self.follow and placed and (filters.company is None or self._follows(filters)):
@@ -139,6 +151,13 @@ def parse_roles(values: Iterable[str]) -> tuple[RoleCategory, ...]:
             raise PreferenceError(unknown_choice("role", value, list(allowed)))
         chosen.append(role)
     return tuple(dict.fromkeys(chosen))
+
+
+def parse_industries(values: Iterable[str]) -> tuple[Industry, ...]:
+    try:
+        return tuple(dict.fromkeys(Industry(value.lower()) for value in split_values(values)))
+    except ValueError as exc:
+        raise PreferenceError("Industries: gaming, fashion, fintech, unknown") from exc
 
 
 def parse_levels(values: Iterable[str]) -> tuple[JobLevel, ...]:

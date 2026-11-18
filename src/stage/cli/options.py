@@ -269,6 +269,14 @@ RoleOption = Annotated[
         ),
     ),
 ]
+IndustryOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--industry",
+        metavar="INDUSTRY",
+        help="Employer industry: gaming, fashion, fintech, unknown. Repeat for OR",
+    ),
+]
 LevelOption = Annotated[
     list[str] | None,
     typer.Option(
@@ -465,12 +473,20 @@ def _filters(
     company: list[str] | None,
     limit: int | None,
     level: list[str] | None = None,
+    industry: list[str] | None = None,
     mine: bool = False,
     as_json: bool = False,
 ) -> "tuple[JobFilters, Preferences | None]":
     from stage.domain import JobFilters, Language, LocationBucket, RoleCategory
     from stage.domain.filters import with_default_levels
+    from stage.domain.preferences import PreferenceError, parse_industries
 
+    try:
+        industries = frozenset(parse_industries(industry or []))
+    except PreferenceError as exc:
+        raise InvalidOptionError(str(exc)) from exc
+    if industry and not industries:
+        raise InvalidOptionError("--industry needs a value")
     chosen, levels = _validated_level(_one(level, "--level"))
     filters = JobFilters(
         location=_parse_enum(_one(location, "--location"), LocationBucket, "--location"),
@@ -482,6 +498,7 @@ def _filters(
         company=_one(company, "--company"),
         limit=limit,
         levels=levels,
+        industries=industries,
     )
     return _mine(filters, as_json) if mine else (with_default_levels(filters), None)
 

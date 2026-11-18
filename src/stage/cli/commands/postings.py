@@ -10,6 +10,7 @@ from stage.cli.options import (
     CompanyOption,
     DatabaseOption,
     ExportAllOption,
+    IndustryOption,
     InvalidOptionError,
     JsonOption,
     LanguageOption,
@@ -93,6 +94,7 @@ def _no_location_hint(count: int, command: str, filters: "JobFilters", untracked
         if value
     ]
     flags = "".join(f" {flag} {quote(value)}" for flag, value in typed)
+    flags += "".join(f" --industry {quote(value.value)}" for value in sorted(filters.industries))
     flags += " --untracked" if untracked else ""
     verb = "has" if count == 1 else "have"
     return f"{count:,} more {verb} no location given: {command} --mine{flags} --location unknown"
@@ -158,6 +160,7 @@ def list_postings(
     term: TermOption = None,
     role: RoleOption = None,
     level: LevelOption = None,
+    industry: IndustryOption = None,
     language: LanguageOption = None,
     source: SourceOption = None,
     company: CompanyOption = None,
@@ -190,6 +193,7 @@ def list_postings(
             term=term,
             role=role,
             level=level,
+            industry=industry,
             language=language,
             source=source,
             company=company,
@@ -261,6 +265,7 @@ def search(
     term: TermOption = None,
     role: RoleOption = None,
     level: LevelOption = None,
+    industry: IndustryOption = None,
     language: LanguageOption = None,
     source: SourceOption = None,
     company: CompanyOption = None,
@@ -308,6 +313,7 @@ def search(
             term=term,
             role=role,
             level=level,
+            industry=industry,
             language=language,
             source=source,
             company=company,
@@ -576,6 +582,7 @@ def export(
     term: TermOption = None,
     role: RoleOption = None,
     level: LevelOption = None,
+    industry: IndustryOption = None,
     language: LanguageOption = None,
     source: SourceOption = None,
     company: CompanyOption = None,
@@ -611,6 +618,7 @@ def export(
             term=term,
             role=role,
             level=level,
+            industry=industry,
             language=language,
             source=source,
             company=company,

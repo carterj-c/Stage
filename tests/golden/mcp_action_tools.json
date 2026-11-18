@@ -129,6 +129,28 @@
           "description": "internship, new-grad, entry, or all. Internships only by default",
           "title": "Level"
         },
+        "industries": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "gaming",
+                  "fashion",
+                  "fintech",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Employer industries (OR). Curated and incomplete. Unknown means unclassified",
+          "title": "Industries"
+        },
         "term": {
           "anyOf": [
             {

@@ -16,6 +16,7 @@ from stage.domain.preferences import (
     clean_text,
     parse_about,
     parse_companies,
+    parse_industries,
     parse_levels,
     parse_locations,
     parse_roles,
@@ -108,6 +109,7 @@ def revise_preferences(
     locations: Sequence[str] | None = None,
     roles: Sequence[str] | None = None,
     levels: Sequence[str] | None = None,
+    industries: Sequence[str] | None = None,
     terms: Sequence[str] | None = None,
     follow: Sequence[str] | None = None,
     avoid: Sequence[str] | None = None,
@@ -124,6 +126,7 @@ def revise_preferences(
         follow=current.follow if follow is None else companies(follow),
         avoid=current.avoid if avoid is None else companies(avoid),
         about=current.about if about is None else parse_about(about),
+        industries=current.industries if industries is None else parse_industries(industries),
         levels=current.levels if levels is None else parse_levels(levels),
     )
     check_overlap(revised.follow, revised.avoid)
@@ -162,6 +165,7 @@ def _payload(preferences: Preferences) -> dict[str, Any]:
         "locations": [location.value for location in preferences.locations],
         "roles": [role.value for role in preferences.roles],
         "levels": [level.value for level in preferences.levels],
+        "industries": [value.value for value in preferences.industries],
         "terms": list(preferences.terms),
         "follow": [{"name": e.name, "folded": e.folded} for e in preferences.follow],
         "avoid": [{"name": e.name, "folded": e.folded} for e in preferences.avoid],
@@ -210,6 +214,7 @@ def _from_payload(payload: dict[str, Any], label: str) -> LoadedPreferences:
         avoid=avoid,
         about=about,
         levels=field("levels", parse_levels, ()),
+        industries=field("industries", parse_industries, ()),
     )
     return LoadedPreferences(preferences, tuple(problems))
 

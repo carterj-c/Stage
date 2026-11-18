@@ -46,6 +46,7 @@ Place = Literal["montreal", "canada", "usa", "unknown"]
 Role = Literal[
     "swe", "security", "data", "ml-ai", "quant", "infra", "embedded", "general-cs", "unknown"
 ]
+Industry = Literal["gaming", "fashion", "fintech", "unknown"]
 Level = Literal["internship", "new-grad", "entry", "all"]
 Language = Literal["en", "fr", "bilingual", "unknown"]
 Status = Literal["saved", "applied", "interviewing", "offer", "rejected", "withdrawn", "hidden"]
@@ -281,6 +282,14 @@ class Tools:
         location: PlaceFilter = None,
         role: RoleFilter = None,
         level: LevelFilter = None,
+        industries: Annotated[
+            list[Industry] | None,
+            Field(
+                description=(
+                    "Employer industries (OR). Curated and incomplete. Unknown means unclassified"
+                )
+            ),
+        ] = None,
         term: TermFilter = None,
         language: LanguageFilter = None,
         company: Company = None,
@@ -313,6 +322,7 @@ class Tools:
             "location": location,
             "role": role,
             "level": level,
+            "industries": industries,
             "term": term,
             "language": language,
             "company": company,
@@ -323,7 +333,9 @@ class Tools:
             "all_matches": all_matches,
         }
         page = COMPACT_PAGE if all_matches else limit
-        filters, described, notes = _chosen(location, role, level, term, language, company, mine)
+        filters, described, notes = _chosen(
+            location, role, level, term, language, company, mine, industries
+        )
         query = words if words.strip() else ""
         window = _window(query, days)
         now = datetime.now(UTC)
@@ -859,6 +871,14 @@ class Tools:
                 description="Levels to keep. An empty list keeps internships only",
             ),
         ] = None,
+        industries: Annotated[
+            list[Industry] | None,
+            Field(
+                description=(
+                    "Employer industries (OR). Curated and incomplete. Unknown means unclassified"
+                )
+            ),
+        ] = None,
         terms: Annotated[
             list[Annotated[str, Field(pattern=CHOSEN_TERM), BeforeValidator(_lowered)]] | None,
             Field(max_length=12, description="Terms such as summer-2027"),
@@ -897,7 +917,7 @@ class Tools:
             unseen_companies,
         )
 
-        fields = (locations, roles, levels, terms, follow, avoid, about)
+        fields = (locations, roles, levels, industries, terms, follow, avoid, about)
         changing = any(value is not None for value in fields)
         if clear and changing:
             raise ToolError("clear deletes every saved preference, so send it alone.")
@@ -934,6 +954,7 @@ class Tools:
                     locations=locations,
                     roles=roles,
                     levels=levels,
+                    industries=industries,
                     terms=terms,
                     follow=follow,
                     avoid=avoid,
@@ -1058,6 +1079,14 @@ class Tools:
         location: PlaceFilter = None,
         role: RoleFilter = None,
         level: LevelFilter = None,
+        industries: Annotated[
+            list[Industry] | None,
+            Field(
+                description=(
+                    "Employer industries (OR). Curated and incomplete. Unknown means unclassified"
+                )
+            ),
+        ] = None,
         term: TermFilter = None,
         language: LanguageFilter = None,
         company: Company = None,
@@ -1079,7 +1108,9 @@ class Tools:
         unusable = _no_folder(root)
         if unusable:
             raise ToolError(unusable)
-        filters, described, notes = _chosen(location, role, level, term, language, company, mine)
+        filters, described, notes = _chosen(
+            location, role, level, term, language, company, mine, industries
+        )
         query = words if words.strip() else ""
         window = _window(query, days)
         now = datetime.now(UTC)
@@ -1231,10 +1262,12 @@ def _chosen(
     language: str | None,
     company: str | None,
     mine: bool,
+    industries: list[Industry] | None = None,
 ) -> tuple[JobFilters, str, list[str]]:
     from stage.domain import Language as Written
     from stage.domain import LocationBucket, RoleCategory
     from stage.domain.filters import chosen_level, with_default_levels
+    from stage.domain.industry import Industry as EmployerIndustry
     from stage.services.preferences import load_preferences
 
     chosen, levels = chosen_level(level) if level else (None, frozenset())
@@ -1247,6 +1280,7 @@ def _chosen(
         company=company,
         limit=None,
         levels=levels,
+        industries=frozenset(EmployerIndustry(value) for value in industries or []),
     )
     if not mine:
         return with_default_levels(filters), "", []
@@ -1331,6 +1365,7 @@ def _preferences(preferences: Preferences, counts: dict[str, int] | None) -> dic
         "locations": [location.value for location in preferences.locations],
         "roles": [role.value for role in preferences.roles],
         "levels": [level.value for level in preferences.levels],
+        "industries": [value.value for value in preferences.industries],
         "terms": list(preferences.terms),
         "follow": [
             {"name": company.name, "open_postings": _count(counts, company.folded)}
@@ -1345,6 +1380,7 @@ def _preferences(preferences: Preferences, counts: dict[str, int] | None) -> dic
             "locations": [location.value for location in CHOOSABLE_LOCATIONS],
             "roles": [role.value for role in CHOOSABLE_ROLES],
             "levels": [level.value for level in CHOOSABLE_LEVELS],
+            "industries": ["gaming", "fashion", "fintech", "unknown"],
             "terms": "a season and a year, such as summer-2027",
         },
     }

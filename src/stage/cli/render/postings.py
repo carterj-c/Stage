@@ -272,6 +272,7 @@ def render_preferences(
     console.print(plain("Saved your preferences." if saved else "Your preferences", "bold"))
     console.print(field("Locations", listed([v.value for v in preferences.locations])))
     console.print(field("Roles", listed([v.value for v in preferences.roles])))
+    console.print(field("Industries", listed([v.value for v in preferences.industries])))
     levels = [v.value for v in preferences.levels]
     console.print(field("Levels", listed(levels) if levels else "internship (the default)"))
     console.print(field("Terms", listed(list(preferences.terms))))

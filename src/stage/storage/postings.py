@@ -97,6 +97,17 @@ def _clauses(filters: JobFilters) -> tuple[list[str], list[Any]]:
             placed = f"({placed} OR ({followed} AND {unplaced}))"
             places = [*places, *companies, *nowhere]
         where(placed, places)
+    if filters.industries:
+        from stage.domain.industry import Industry, employer_industries
+
+        catalogue = employer_industries()
+        matching = [name for name, labels in catalogue.items() if labels & filters.industries]
+        parts = [f"jobs.company_fold IN {EACH}"]
+        values = [listed(matching)]
+        if Industry.UNKNOWN in filters.industries:
+            parts.append(f"jobs.company_fold NOT IN {EACH}")
+            values.append(listed(catalogue))
+        where("(" + " OR ".join(parts) + ")", values)
     if filters.roles:
         where(*_among("jobs.role", {role.value for role in filters.roles}))
     if filters.levels:

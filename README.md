@@ -414,3 +414,39 @@ MIT. See [LICENSE](LICENSE).
 <br>
 <sub>Built for students who would rather be studying than refreshing career pages.</sub>
 </div>
+
+### Employer industries
+
+Filter employers independently of the posting's role or level:
+
+```sh
+stage list --industry gaming
+stage search python --industry fashion --industry fintech --level all
+stage export --industry gaming --format csv --all
+stage prefs --industry gaming,fintech
+stage list --mine
+stage list --industry unknown
+```
+
+Repeated industries (or comma-separated values) match **any** selected industry;
+other filters still intersect, before counts and pagination. An explicit industry
+selection overrides saved industries under `--mine`. `stage prefs --industry ""`
+clears this preference. TUI filters offer a single industry selection; MCP search,
+export and preferences accept an `industries` list.
+
+Labels classify the **employer**, not every team or job it offers. The curated
+catalogue is deliberately incomplete: `unknown` means the stored employer name
+has no exact alias in the catalogue, not that its actual industry is unknowable.
+No industry filter preserves existing results. Stage never infers industry from
+a title, source job category, substring, or similar-looking company name.
+Fintech covers financial technology and payment platforms (including Shopify's
+commerce/payment platform); traditional banks are not classified as fintech.
+
+To extend the taxonomy, edit `src/stage/data/industries.json`. Each employer has
+explicit `aliases` and one or more `industries` from `Industry` in
+`src/stage/domain/industry.py`. Aliases use the same `fold_company` normalization
+as stored postings; duplicate normalized aliases are rejected, even within one
+entry. Add divisions only when their exact name unambiguously identifies the
+employer. Do not add ambiguous abbreviations or infer a subsidiary's classification
+from a parent name. New industry labels also need CLI/MCP choices and tests.
+Catalogue changes apply to already stored rows without a sync or database migration.
