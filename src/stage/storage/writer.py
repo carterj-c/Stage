@@ -112,10 +112,14 @@ class AsyncRepository:
         return await self._writer.run(lambda repository: repository.stale_members(source, before))
 
     async def detail_queue(
-        self, source: str, limit: int, boards: Collection[str] | None = None
+        self,
+        source: str,
+        limit: int,
+        boards: Collection[str] | None = None,
+        ids: Collection[str] | None = None,
     ) -> list[str]:
         return await self._writer.run(
-            lambda repository: repository.detail_queue(source, limit, boards)
+            lambda repository: repository.detail_queue(source, limit, boards, ids)
         )
 
     async def detail_queue_size(self, source: str) -> int:

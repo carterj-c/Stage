@@ -1,8 +1,9 @@
 import re
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, ClassVar
+from urllib.parse import unquote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -347,6 +348,7 @@ class WorkdayAdapter:
         full_read: bool = False,
         size_known: bool = False,
         search: bool = True,
+        detail_selector: Callable[[Sequence[str]], Awaitable[Sequence[str]]] | None = None,
     ) -> FetchResult:
         if page_budget < 1:
             raise ValueError("Workday page budget must be positive")
@@ -552,7 +554,8 @@ class WorkdayAdapter:
         internship_facets = workday_facet_lexicon()[0]
         faceted = "internship" if set(applied) & set(internship_facets) else ""
         paired = [(posting, _to_job(company, posting, now, faceted)) for posting in postings]
-        wanted = set(details)
+        candidates = [job.id for posting, job in paired if _safe_detail_path(posting.externalPath)]
+        wanted = set(await detail_selector(candidates) if detail_selector is not None else details)
         fetched: list[DetailFetch] = []
         if wanted:
             paired, fetched = await _attach_descriptions(company, client, paired, wanted)
@@ -803,6 +806,24 @@ def _hidden(row: Any) -> bool:
     return isinstance(row, dict) and not row.get("title") and not row.get("externalPath")
 
 
+def _safe_detail_path(path: str) -> bool:
+    decoded = path
+    for _ in range(5):
+        if (
+            not decoded.startswith("/job/")
+            or len(decoded) <= len("/job/")
+            or any(char in decoded for char in "\\?#")
+            or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+            or any(part in {".", ".."} for part in decoded.split("/"))
+        ):
+            return False
+        expanded = unquote(decoded)
+        if expanded == decoded:
+            return True
+        decoded = expanded
+    return False
+
+
 async def _attach_descriptions(
     company: Company,
     client: HttpClient,
@@ -815,7 +836,7 @@ async def _attach_descriptions(
     outcomes: list[DetailFetch] = []
     fetched: dict[str, tuple[str, str] | None] = {}
     for posting, job in paired:
-        if job.id not in wanted or job.id in fetched or not posting.externalPath:
+        if job.id not in wanted or job.id in fetched or not _safe_detail_path(posting.externalPath):
             continue
         fetched[job.id] = None
         url = f"https://{host}/wday/cxs/{company.workday_tenant}/{company.workday_site}{posting.externalPath}"

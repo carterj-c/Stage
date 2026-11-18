@@ -1192,25 +1192,89 @@ def _crawl_given_up(result: FetchResult) -> FetchResult:
     )
 
 
+@dataclass(slots=True)
+class WorkdayDetails:
+    repository: AsyncRepository
+    limit: int
+    boards: dict[int, str]
+    pending: set[int]
+    candidates: dict[int, set[str]] = field(default_factory=dict)
+    selected: list[str] = field(default_factory=list)
+    assigned: dict[int, list[str]] = field(default_factory=dict)
+    error: Exception | None = None
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @classmethod
+    def from_plan(
+        cls, repository: AsyncRepository, adapter: WorkdayAdapter, plan: BoardPlan
+    ) -> "WorkdayDetails":
+        boards = {
+            index: _safe_board_key(adapter, company) for index, company in enumerate(plan.ordered)
+        }
+        return cls(repository, plan.detail_budget, boards, set(boards))
+
+    async def arrive(self, token: int, candidates: Sequence[str] = ()) -> None:
+        async with self.lock:
+            if token not in self.pending:
+                return
+            self.candidates[token] = set(candidates)
+            self.pending.remove(token)
+            if self.pending:
+                return
+            try:
+                eligible = set().union(*self.candidates.values())
+                self.selected = await self.repository.detail_queue(
+                    "workday", self.limit, boards=list(self.boards.values()), ids=eligible
+                )
+                for ident in self.selected:
+                    owner = next(
+                        index for index in self.boards if ident in self.candidates.get(index, set())
+                    )
+                    self.assigned.setdefault(owner, []).append(ident)
+            except Exception as exc:
+                self.error = exc
+            finally:
+                self.ready.set()
+
+    async def select(self, token: int, candidates: Sequence[str]) -> list[str]:
+        await self.arrive(token, candidates)
+        await self.ready.wait()
+        if self.error is not None:
+            raise self.error
+        return self.assigned.get(token, [])
+
+
 async def _fetch_company(
-    adapter: Adapter, company: Company, client: HttpClient, now: datetime, plan: BoardPlan
+    adapter: Adapter,
+    company: Company,
+    client: HttpClient,
+    now: datetime,
+    plan: BoardPlan,
+    details: WorkdayDetails | None,
+    token: int,
 ) -> FetchResult:
     if not isinstance(adapter, WorkdayAdapter):
         return await adapter.fetch(company, client, now, plan.facets, plan.detail_queue)
     board = _safe_board_key(adapter, company)
-    result = await adapter.fetch(
-        company,
-        client,
-        now,
-        plan.facets,
-        plan.detail_queue,
-        crawl=plan.crawls.get(board),
-        page_budget=plan.page_budgets[company.registry_key],
-        full_read=company.registry_key in plan.full_reads,
-        size_known=board in plan.full_states,
-        search=company.registry_key in plan.searches,
-    )
-    return _crawl_given_up(result) if board in plan.crawls else result
+    try:
+        result = await adapter.fetch(
+            company,
+            client,
+            now,
+            plan.facets,
+            plan.detail_queue,
+            crawl=plan.crawls.get(board),
+            page_budget=plan.page_budgets[company.registry_key],
+            full_read=company.registry_key in plan.full_reads,
+            size_known=board in plan.full_states,
+            search=company.registry_key in plan.searches,
+            detail_selector=partial(details.select, token) if details is not None else None,
+        )
+        return _crawl_given_up(result) if board in plan.crawls else result
+    finally:
+        if details is not None:
+            await details.arrive(token)
 
 
 async def _read_boards(
@@ -1220,18 +1284,19 @@ async def _read_boards(
     now: datetime,
     harvest: FetchHarvest,
     ledger: RunLedger,
+    details: WorkdayDetails | None,
 ) -> AsyncGenerator[SyncEvent]:
     source = adapter.name
     pending = [
         asyncio.create_task(
             _attempt(
-                partial(_fetch_company, adapter, company, client, now, plan),
+                partial(_fetch_company, adapter, company, client, now, plan, details, token),
                 _safe_board_key(adapter, company),
                 company.name,
                 _safe_plan(adapter, company)[0],
             )
         )
-        for company in plan.ordered
+        for token, company in enumerate(plan.ordered)
     ]
     try:
         for company in plan.ordered:
@@ -1290,6 +1355,11 @@ async def _run_company_source(
 
     cache = ValidatorCache(plan.seed)
     harvest = FetchHarvest(refusers=plan.refusers)
+    details = (
+        WorkdayDetails.from_plan(repository, adapter, plan)
+        if isinstance(adapter, WorkdayAdapter)
+        else None
+    )
     hosts = adapter.hosts_for(plan.ordered)
     async with HttpClient(
         allowed_hosts=hosts,
@@ -1305,7 +1375,7 @@ async def _run_company_source(
         host_fronts={host: platform_front(host) for host in hosts},
     ) as client:
         async with aclosing(
-            _read_boards(adapter, plan, client, run_started_at, harvest, ledger)
+            _read_boards(adapter, plan, client, run_started_at, harvest, ledger, details)
         ) as events:
             async for event in events:
                 yield event
@@ -1334,8 +1404,16 @@ async def _run_company_source(
             forgotten_facets=tuple(harvest.forgotten_facets),
             workday_crawls=tuple(harvest.workday_crawls),
             detail_fetches=tuple(harvest.detail_outcomes),
-            detail_queue_cursor=plan.detail_queue[-1] if plan.detail_queue else None,
-            detail_queue_selected=tuple(plan.detail_queue),
+            detail_queue_cursor=(
+                details.selected[-1]
+                if details is not None and details.selected
+                else plan.detail_queue[-1]
+                if details is None and plan.detail_queue
+                else None
+            ),
+            detail_queue_selected=(
+                tuple(details.selected) if details is not None else tuple(plan.detail_queue)
+            ),
             visits=tuple(harvest.visits),
             resolve_duplicates=resolve_duplicates,
             list_sources=frozenset(get_feeds()),

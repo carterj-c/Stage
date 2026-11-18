@@ -68,7 +68,7 @@ class SourceBatch:
     resolve_duplicates: Resolver | None = None
 
     detail_queue_cursor: str | None = None
-    detail_queue_selected: tuple[str, ...] = field(default_factory=tuple)
+    detail_queue_selected: tuple[str, ...] | None = None
     closes_whole_source: bool = False
     list_sources: frozenset[str] = frozenset()
 
@@ -104,7 +104,11 @@ class Repository(Protocol):
         pass
 
     def detail_queue(
-        self, source: str, limit: int, boards: Collection[str] | None = None
+        self,
+        source: str,
+        limit: int,
+        boards: Collection[str] | None = None,
+        ids: Collection[str] | None = None,
     ) -> list[str]:
         pass
 

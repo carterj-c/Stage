@@ -442,8 +442,12 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
-            selected = batch.detail_queue_selected or (
-                (batch.detail_queue_cursor,) if batch.detail_queue_cursor is not None else ()
+            selected = (
+                batch.detail_queue_selected
+                if batch.detail_queue_selected is not None
+                else (batch.detail_queue_cursor,)
+                if batch.detail_queue_cursor is not None
+                else ()
             )
             cursors = {board_of(ident, batch.source): ident for ident in selected}
             last = batch.detail_queue_cursor or (selected[-1] if selected else None)

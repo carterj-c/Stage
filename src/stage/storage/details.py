@@ -84,12 +84,23 @@ def _queued(source: str) -> tuple[object, ...]:
 
 class DetailFetches(Store):
     def detail_queue(
-        self, source: str, limit: int, boards: Collection[str] | None = None
+        self,
+        source: str,
+        limit: int,
+        boards: Collection[str] | None = None,
+        ids: Collection[str] | None = None,
     ) -> list[str]:
-        if limit <= 0 or boards is not None and not boards:
+        if limit <= 0 or (boards is not None and not boards) or (ids is not None and not ids):
             return []
-        scope = "" if boards is None else f"WHERE stage_board_of(id, ?) IN {EACH} "
-        params = () if boards is None else (source, listed(boards))
+        filters: list[str] = []
+        params: list[object] = []
+        if boards is not None:
+            filters.append(f"stage_board_of(id, ?) IN {EACH}")
+            params.extend((source, listed(boards)))
+        if ids is not None:
+            filters.append(f"id IN {EACH}")
+            params.append(listed(ids))
+        scope = f"WHERE {' AND '.join(filters)} " if filters else ""
         rows = self._conn.execute(
             f"WITH candidates AS (SELECT id, rank, first_seen, stage_board_of(id, ?) AS board "
             f"FROM ({_QUEUE}) {scope}), "
