@@ -157,7 +157,9 @@ def parse_industries(values: Iterable[str]) -> tuple[Industry, ...]:
     try:
         return tuple(dict.fromkeys(Industry(value.lower()) for value in split_values(values)))
     except ValueError as exc:
-        raise PreferenceError("Industries: gaming, fashion, fintech, unknown") from exc
+        raise PreferenceError(
+            "Industries: gaming, fashion, fintech, tech, finance, unknown"
+        ) from exc
 
 
 def parse_levels(values: Iterable[str]) -> tuple[JobLevel, ...]:

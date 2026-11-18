@@ -20,8 +20,7 @@
   },
   {
     "aliases": [
-      "Electronic Arts",
-      "EA"
+      "Electronic Arts"
     ],
     "industries": [
       "gaming"
@@ -72,7 +71,8 @@
       "Shopify"
     ],
     "industries": [
-      "fintech"
+      "fintech",
+      "tech"
     ]
   },
   {
@@ -80,7 +80,9 @@
       "Stripe"
     ],
     "industries": [
-      "fintech"
+      "fintech",
+      "tech",
+      "finance"
     ]
   },
   {
@@ -88,16 +90,19 @@
       "Wealthsimple"
     ],
     "industries": [
-      "fintech"
+      "fintech",
+      "tech",
+      "finance"
     ]
   },
   {
     "aliases": [
-      "Block",
-      "Square"
+      "Block, Inc."
     ],
     "industries": [
-      "fintech"
+      "fintech",
+      "tech",
+      "finance"
     ]
   },
   {
@@ -105,7 +110,9 @@
       "PayPal"
     ],
     "industries": [
-      "fintech"
+      "fintech",
+      "tech",
+      "finance"
     ]
   },
   {
@@ -113,7 +120,525 @@
       "Affirm"
     ],
     "industries": [
-      "fintech"
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Behaviour Interactive"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Warner Bros Games"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Rockstar Games"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Sony Interactive Entertainment"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Square Enix"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Take-Two Interactive"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Larian Studios"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Insomniac Games"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Gameloft"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Budge Studios"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Blackbird Interactive"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Compulsion Games"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Avalanche Studios Group"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "NetEase Games"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Haven Studios"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Uken Games"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Torn banner studios"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Velan Studios"
+    ],
+    "industries": [
+      "gaming"
+    ]
+  },
+  {
+    "aliases": [
+      "Nike"
+    ],
+    "industries": [
+      "fashion"
+    ]
+  },
+  {
+    "aliases": [
+      "New Balance"
+    ],
+    "industries": [
+      "fashion"
+    ]
+  },
+  {
+    "aliases": [
+      "Levi Strauss & Co."
+    ],
+    "industries": [
+      "fashion"
+    ]
+  },
+  {
+    "aliases": [
+      "SHEIN"
+    ],
+    "industries": [
+      "fashion"
+    ]
+  },
+  {
+    "aliases": [
+      "Adyen"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Coinbase"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Plaid"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Robinhood"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Chime"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Nuvei"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Moneris"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Visa"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Mastercard"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Wise"
+    ],
+    "industries": [
+      "fintech",
+      "tech",
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Microsoft"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Google"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Apple"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "NVIDIA"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Adobe"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Salesforce"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Cloudflare"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Databricks"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Snowflake"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Figma"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "GitHub"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Atlassian"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Oracle"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Twilio"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Discord"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Spotify"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Netflix"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Intuit"
+    ],
+    "industries": [
+      "tech"
+    ]
+  },
+  {
+    "aliases": [
+      "Royal Bank of Canada"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "TD Bank"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Scotiabank"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "National Bank of Canada"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Bank of America"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Desjardins"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Capital One"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Goldman Sachs"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Morgan Stanley"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Fidelity Investments"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Fidelity Canada"
+    ],
+    "industries": [
+      "finance"
+    ]
+  },
+  {
+    "aliases": [
+      "Interactive Brokers"
+    ],
+    "industries": [
+      "finance"
     ]
   }
 ]

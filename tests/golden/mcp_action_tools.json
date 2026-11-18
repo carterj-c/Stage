@@ -146,6 +146,8 @@
                   "gaming",
                   "fashion",
                   "fintech",
+                  "tech",
+                  "finance",
                   "unknown"
                 ],
                 "type": "string"

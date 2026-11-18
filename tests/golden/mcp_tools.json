@@ -92,6 +92,8 @@
                   "gaming",
                   "fashion",
                   "fintech",
+                  "tech",
+                  "finance",
                   "unknown"
                 ],
                 "type": "string"
@@ -756,6 +758,8 @@
                   "gaming",
                   "fashion",
                   "fintech",
+                  "tech",
+                  "finance",
                   "unknown"
                 ],
                 "type": "string"

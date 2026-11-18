@@ -421,6 +421,8 @@ Filter employers independently of the posting's role or level:
 
 ```sh
 stage list --industry gaming
+stage list --industry tech
+stage list --industry finance
 stage search python --industry fashion --industry fintech --level all
 stage export --industry gaming --format csv --all
 stage prefs --industry gaming,fintech
@@ -440,7 +442,11 @@ has no exact alias in the catalogue, not that its actual industry is unknowable.
 No industry filter preserves existing results. Stage never infers industry from
 a title, source job category, substring, or similar-looking company name.
 Fintech covers financial technology and payment platforms (including Shopify's
-commerce/payment platform); traditional banks are not classified as fintech.
+commerce/payment platform). Finance includes traditional banks and financial
+services. Tech covers explicitly curated technology companies; having software
+roles does not make an employer a tech company. Some employers have multiple
+labels, such as Stripe in fintech, tech and finance. Traditional banks are not
+automatically classified as fintech.
 
 To extend the taxonomy, edit `src/stage/data/industries.json`. Each employer has
 explicit `aliases` and one or more `industries` from `Industry` in

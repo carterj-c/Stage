@@ -61,7 +61,7 @@ Role = Literal[
     "risk",
     "unknown",
 ]
-Industry = Literal["gaming", "fashion", "fintech", "unknown"]
+Industry = Literal["gaming", "fashion", "fintech", "tech", "finance", "unknown"]
 Level = Literal["internship", "new-grad", "entry", "mid", "senior", "unknown", "all"]
 Language = Literal["en", "fr", "bilingual", "unknown"]
 Status = Literal["saved", "applied", "interviewing", "offer", "rejected", "withdrawn", "hidden"]
@@ -1415,7 +1415,7 @@ def _preferences(preferences: Preferences, counts: dict[str, int] | None) -> dic
             "locations": [location.value for location in CHOOSABLE_LOCATIONS],
             "roles": [role.value for role in CHOOSABLE_ROLES],
             "levels": [level.value for level in CHOOSABLE_LEVELS],
-            "industries": ["gaming", "fashion", "fintech", "unknown"],
+            "industries": ["gaming", "fashion", "fintech", "tech", "finance", "unknown"],
             "terms": "a season and a year, such as summer-2027",
         },
     }

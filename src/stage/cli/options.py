@@ -274,7 +274,7 @@ IndustryOption = Annotated[
     typer.Option(
         "--industry",
         metavar="INDUSTRY",
-        help="Employer industry: gaming, fashion, fintech, unknown. Repeat for OR",
+        help="Employer industry: gaming, fashion, fintech, tech, finance, unknown. Repeat for OR",
     ),
 ]
 LevelOption = Annotated[

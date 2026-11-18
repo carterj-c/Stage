@@ -80,10 +80,22 @@ def test_catalogue_normalizes_and_rejects_collisions() -> None:
         ("Shopify", Industry.FINTECH),
         ("Stripe", Industry.FINTECH),
         ("Wealthsimple", Industry.FINTECH),
+        ("Behaviour Interactive", Industry.GAMING),
+        ("Rockstar Games", Industry.GAMING),
+        ("Square Enix", Industry.GAMING),
+        ("Nike", Industry.FASHION),
+        ("Levi Strauss & Co.", Industry.FASHION),
+        ("Adyen", Industry.FINTECH),
+        ("Microsoft", Industry.TECH),
+        ("Royal Bank of Canada", Industry.FINANCE),
     ):
         assert industry in catalogue[fold_company(company)]
     assert "riot" not in catalogue
-    assert "royal bank of canada" not in catalogue
+    assert "ea" not in catalogue
+    assert "square" not in catalogue
+    assert "block" not in catalogue
+    assert catalogue[fold_company("Stripe")] == {Industry.FINTECH, Industry.TECH, Industry.FINANCE}
+    assert catalogue[fold_company("Royal Bank of Canada")] == {Industry.FINANCE}
     both = validate_catalogue([{"aliases": ["Dual"], "industries": ["gaming", "fintech"]}])
     assert both["dual"] == {Industry.GAMING, Industry.FINTECH}
     with pytest.raises(ValueError, match="Colliding"):
@@ -107,12 +119,12 @@ def test_stored_rows_or_unknown_intersection_limits_and_counts(stored: Path) -> 
             )
             == 3
         )
-        assert repo.count_jobs(replace(base, industries=frozenset({Industry.UNKNOWN}))) == 3
+        assert repo.count_jobs(replace(base, industries=frozenset({Industry.UNKNOWN}))) == 2
         assert (
             repo.count_jobs(
                 replace(base, industries=frozenset({Industry.UNKNOWN, Industry.GAMING}))
             )
-            == 5
+            == 4
         )
         assert repo.count_jobs(JobFilters()) == 7
 
@@ -242,3 +254,54 @@ def test_multiple_labels_for_one_employer(stored: Path, monkeypatch: pytest.Monk
             repo.count_jobs(JobFilters(industries=frozenset({Industry.GAMING, Industry.FINTECH})))
             == 3
         )
+
+
+def test_finance_tech_and_unknown_stored_postings(stored: Path) -> None:
+    with closing(SqliteRepository.connect(stored)) as repo:
+        finance = JobFilters(industries=frozenset({Industry.FINANCE}), limit=None)
+        assert {job.company for job in repo.list_jobs(finance)} == {
+            "Stripe",
+            "Royal Bank of Canada",
+        }
+        fintech = replace(finance, industries=frozenset({Industry.FINTECH}))
+        assert {job.company for job in repo.list_jobs(fintech)} == {"Stripe"}
+        tech_finance = replace(finance, industries=frozenset({Industry.TECH, Industry.FINANCE}))
+        assert repo.count_jobs(tech_finance) == 2
+        unknown = replace(finance, industries=frozenset({Industry.UNKNOWN}))
+        assert {job.company for job in repo.list_jobs(unknown)} == {"Riot", "Unlisted"}
+
+
+def test_cli_new_industries_and_saved_preferences(stored: Path) -> None:
+    runner = CliRunner()
+    saved = runner.invoke(app, ["prefs", "--industry", "tech,finance", "--json"])
+    assert saved.exit_code == 0, saved.output
+    found = runner.invoke(app, ["list", "--db", str(stored), "--mine", "--json"])
+    assert found.exit_code == 0, found.output
+    assert "Stripe" in found.output and "Royal Bank of Canada" in found.output
+    assert "Riot Games" not in found.output
+    state = FilterState()
+    for choice in ("tech", "finance"):
+        state.choose("industry", choice)
+        assert state.as_filters().industries == {Industry(choice)}
+        assert any(row[:2] == ("industry", choice) for row in filter_rows(state))
+
+
+async def test_mcp_new_industry_choices(stored: Path) -> None:
+    async with Client(build_server(stored, actions=True)) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+        for name in ("search_postings", "export_postings", "set_preferences"):
+            schema = tools[name].input_schema["properties"]["industries"]
+            assert {"tech", "finance"} <= set(schema["anyOf"][0]["items"]["enum"])
+        result = await client.call_tool("search_postings", {"industries": ["finance", "tech"]})
+        assert isinstance(result.content[0], TextContent)
+        found = json.loads(result.content[0].text)
+        assert found["total"] == 2
+        assert {posting["company"] for posting in found["postings"]} == {
+            "Stripe",
+            "Royal Bank of Canada",
+        }
+        saved = await client.call_tool("set_preferences", {"industries": ["tech", "finance"]})
+        assert not saved.is_error
+        mine = await client.call_tool("search_postings", {"mine": True})
+        assert isinstance(mine.content[0], TextContent)
+        assert json.loads(mine.content[0].text)["total"] == 2
