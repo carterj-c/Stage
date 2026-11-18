@@ -154,7 +154,7 @@ async def test_seed_then_hydrate_classified_jobs_with_a_bounded_scheduled_queue(
         assert len(respx.calls) <= 4 * posture.max_requests_per_run
 
 
-@pytest.mark.parametrize("source", ["workday", "smartrecruiters"])
+@pytest.mark.parametrize("source", ["workday", "smartrecruiters", "jobvite"])
 async def test_scoped_queue_filters_before_limit_and_is_safe_when_empty(
     db_path: Path, source: str
 ) -> None:
@@ -359,3 +359,37 @@ async def test_workday_planner_passes_scheduled_backlog_to_crowded_allocator(db_
         assert (
             sum(plan.page_budgets.values()) + plan.detail_budget + adapter.retry_reserve <= ceiling
         )
+
+
+def test_reserved_workday_details_are_charged_once_before_full_reads() -> None:
+    adapter = WorkdayAdapter()
+    companies = [
+        Company(
+            name=f"Board {index}",
+            slug=f"b{index}",
+            platform=Platform.WORKDAY,
+            workday_tenant=f"b{index}",
+            workday_site="careers",
+            workday_dc="wd3",
+        )
+        for index in range(3)
+    ]
+    extra_pages = 20
+    ceiling = (
+        adapter.retry_reserve
+        + len(companies) * adapter.crawl_page_cap
+        + adapter.detail_budget
+        + adapter.check_reserve
+        + extra_pages
+    )
+    pages, details = adapter.crawl_budgets(
+        companies,
+        {},
+        {},
+        ceiling,
+        full_reads=[companies[0].registry_key],
+        queued_details=adapter.detail_budget,
+    )
+    assert details == adapter.detail_budget
+    assert pages[companies[0].registry_key] == adapter.crawl_page_cap + extra_pages
+    assert sum(pages.values()) + details + adapter.retry_reserve + adapter.check_reserve == ceiling

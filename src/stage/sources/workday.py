@@ -298,8 +298,9 @@ class WorkdayAdapter:
             extra = max(0, min(remaining, cls.crawl_page_cap + SEARCH_PAGES - budgets[key]))
             budgets[key] += extra
             remaining -= extra
-        details = reserved_details + min(cls.detail_budget - reserved_details, max(0, remaining))
-        remaining = max(0, remaining - details - cls.check_reserve)
+        extra_details = min(cls.detail_budget - reserved_details, max(0, remaining))
+        details = reserved_details + extra_details
+        remaining = max(0, remaining - extra_details - cls.check_reserve)
         for key in full_reads:
             if key not in budgets:
                 continue

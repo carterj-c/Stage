@@ -28,7 +28,7 @@ REREAD_ATTEMPTS = 2
 _QUEUED = (
     "FROM jobs j LEFT JOIN detail_fetches d ON d.id = j.id "
     "WHERE j.source = ? AND j.status = ? AND ("
-    "(j.description = '' AND (j.source IN ('workday', 'smartrecruiters') "
+    "(j.description = '' AND (j.source IN ('workday', 'smartrecruiters', 'jobvite') "
     "OR j.term = ? OR j.role = ?) AND (d.id IS NULL "
     "OR (d.failed = 1 AND d.attempts < ?) OR (d.resolved = 1 AND d.attempts < ?))) "
     "OR (j.location_raw GLOB ? AND (d.id IS NULL OR d.attempts < ?)))"
