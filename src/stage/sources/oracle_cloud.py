@@ -63,7 +63,13 @@ def _text(raw: str) -> str:
     return collapse_whitespace(soup.get_text(" ", strip=True))
 
 
-def _detail_body(payload: Any, identifier: str, summary: str) -> str:
+def _detail_body(
+    payload: Any,
+    identifier: str,
+    summary: str,
+    listing_qualifications: str = "",
+    listing_responsibilities: str = "",
+) -> str:
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, list) or len(items) != 1:
         return ""
@@ -80,12 +86,25 @@ def _detail_body(payload: Any, identifier: str, summary: str) -> str:
         )
         if (text := _text(raw))
     ]
-    summaries = [
-        text.casefold() for raw in (summary, row.ShortDescriptionStr) if (text := _text(raw))
+    listing = [
+        text.casefold()
+        for raw in (summary, listing_qualifications, listing_responsibilities)
+        if (text := _text(raw))
     ]
-    if summaries and not any(
-        all(section.casefold() not in known for known in summaries) for section in core
-    ):
+    detail_summary = _text(row.ShortDescriptionStr).casefold()
+    known = [text for text in (" ".join(listing), detail_summary) if text]
+
+    def adds_content(section: str) -> bool:
+        section = section.casefold()
+        if any(section in text for text in known):
+            return False
+        # A detail paragraph can assemble the same listing sections in a different order.
+        for text in (*listing, detail_summary):
+            if text:
+                section = section.replace(text, " ")
+        return any(char.isalnum() for char in section)
+
+    if known and not any(adds_content(section) for section in core):
         return ""
     return "\n\n".join(
         [
@@ -236,7 +255,13 @@ class OracleCloudAdapter:
                         revalidate=True,
                     )
                     if not response.not_modified:
-                        body = _detail_body(response.payload, row.Id, row.ShortDescriptionStr)
+                        body = _detail_body(
+                            response.payload,
+                            row.Id,
+                            row.ShortDescriptionStr,
+                            row.ExternalQualificationsStr,
+                            row.ExternalResponsibilitiesStr,
+                        )
                 except RequestRefusedError:
                     # No request was admitted: do not consume a persisted retry attempt.
                     break

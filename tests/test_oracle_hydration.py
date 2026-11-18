@@ -680,3 +680,95 @@ async def test_migration_rearms_exhausted_unverified_reread_without_exposing_tex
             == "Possibly full former body"
         )
         assert repo._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+@respx.mock
+async def test_repeated_listing_sections_do_not_count_as_new_detail(db_path: Path) -> None:
+    listing = _posting()
+    listing["ShortDescriptionStr"] = "Build <b>systems</b>"
+    listing["ExternalQualificationsStr"] = "Python &amp; SQL"
+    listing["ExternalResponsibilitiesStr"] = "Develop services"
+    respx.get(ADAPTER.url_for(COMPANY)).respond(200, json=_listing(listing))
+    detail = respx.get(DETAIL_URL).respond(
+        200,
+        json={
+            "items": [
+                {
+                    "Id": "91731",
+                    "ExternalDescriptionStr": "<p>Build systems</p>",
+                    "ExternalQualificationsStr": "Python &amp; SQL",
+                    "ExternalResponsibilitiesStr": "Develop services",
+                    "CorporateDescriptionStr": "We are an equal opportunity employer.",
+                }
+            ]
+        },
+    )
+    async with _client() as client, open_repository(db_path) as repo:
+        summary = await ADAPTER.fetch(COMPANY, client, NOW)
+        await _persist_source_batch(
+            repo, Screener(), SourceBatch(source=ADAPTER.name, run_started_at=NOW), summary.jobs
+        )
+        rejected = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id()])
+        assert rejected.authoritative
+        assert rejected.jobs[0].description == ""
+        assert rejected.detail_fetches == (DetailFetch(id=_id(), failed=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name,
+                run_started_at=NOW + timedelta(minutes=1),
+                detail_fetches=rejected.detail_fetches,
+            ),
+            rejected.jobs,
+        )
+        assert await repo.detail_queue(ADAPTER.name, 1, now=NOW + timedelta(minutes=1)) == [_id()]
+        saved = await repo.get_job(_id())
+        assert saved is not None and saved.description == ""
+        detail.respond(
+            200,
+            json={
+                "items": [
+                    {
+                        "Id": "91731",
+                        "ExternalDescriptionStr": "<p>Build systems</p>",
+                        "ExternalQualificationsStr": (
+                            "Python &amp; SQL. Must have 2 years of experience."
+                        ),
+                        "ExternalResponsibilitiesStr": "Develop services",
+                        "CorporateDescriptionStr": "We are an equal opportunity employer.",
+                    }
+                ]
+            },
+        )
+        full = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(minutes=2), details=[_id()])
+        assert full.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
+        assert "Must have 2 years of experience" in full.jobs[0].description
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name,
+                run_started_at=NOW + timedelta(minutes=2),
+                detail_fetches=full.detail_fetches,
+            ),
+            full.jobs,
+        )
+        assert await repo.detail_queue(ADAPTER.name, 1, now=NOW + timedelta(minutes=2)) == []
+        saved = await repo.get_job(_id())
+        assert saved is not None and "Must have 2 years of experience" in saved.description
+
+
+def test_reordered_assembled_listing_sections_are_still_only_summary() -> None:
+    payload = {
+        "items": [
+            {
+                "Id": "91731",
+                "ExternalDescriptionStr": "Develop services. Python &amp; SQL. Build systems.",
+            }
+        ]
+    }
+    assert (
+        _detail_body(payload, "91731", "Build systems", "Python &amp; SQL", "Develop services")
+        == ""
+    )
