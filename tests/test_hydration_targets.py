@@ -13,6 +13,7 @@ from stage.services.hydration_targets import (
     target_for_url,
 )
 
+ASHBY_ENDPOINT = "https://api.ashbyhq.com/posting-api/job-board/Acme"
 UUID = "337314ee-4de5-4b96-a419-1b9287a7df68"
 URLS = {
     "greenhouse": "https://job-boards.greenhouse.io/Acme/jobs/12345",
@@ -46,6 +47,15 @@ def posting(provider: str) -> dict[str, object]:
             "description": "<p>Build systems</p>",
             "requirements": "<ul><li>Master's degree</li></ul>",
             "benefits": "<p>Health insurance</p>",
+        }
+    if provider == "ashby":
+        return {
+            "id": UUID,
+            "title": "Engineer",
+            "jobUrl": URLS["ashby"],
+            "isListed": True,
+            "descriptionPlain": "Build systems\nRequirements\nMaster's degree",
+            "descriptionHtml": "<p>Build systems</p><p>Master's degree</p>",
         }
     return {
         "id": UUID,
@@ -87,7 +97,7 @@ def client_for(response: httpx.Response) -> HttpClient:
             "lever",
             f"https://api.lever.co/v0/postings/Acme/{UUID}?mode=json",
         ),
-        (URLS["ashby"] + "/application", "ashby", URLS["ashby"]),
+        (URLS["ashby"] + "/application?source=feed#apply", "ashby", ASHBY_ENDPOINT),
         (
             URLS["workable"],
             "workable",
@@ -131,6 +141,15 @@ def test_exact_target(url: str, provider: str, endpoint: str) -> None:
         URLS["lever"] + "%2fapply",
         "https://jobs.eu.lever.co/acme/" + UUID,
         "https://jobs.ashbyhq.com/acme/not-a-uuid",
+        "https://api.ashbyhq.com/posting-api/job-board/Acme",
+        "https://jobs.ashbyhq.com.evil.test/Acme/" + UUID,
+        "https://jobs.ashbyhq.com:443/Acme/" + UUID,
+        "https://user@jobs.ashbyhq.com/Acme/" + UUID,
+        "https://jobs.ashbyhq.com/../" + UUID,
+        "https://jobs.ashbyhq.com/Acme%2fOther/" + UUID,
+        "https://jobs.ashbyhq.com/Acme/../" + UUID,
+        URLS["ashby"] + "/extra",
+        URLS["ashby"] + "%2fapplication",
         "https://apply.workable.com/acme/j/abc1234567/",
         "https://apply.workable.com/acme/j/ABC1234567/apply/",
         "https://apply.workable.com/acme/j/ABC/",
@@ -230,44 +249,139 @@ async def test_empty_optional_workable_sections_are_explicitly_valid() -> None:
     assert result is not None and result.complete
 
 
-def ashby_page(url: str = URLS["ashby"]) -> str:
-    node = {
-        "@type": "JobPosting",
-        "url": url,
-        "title": "Engineer",
-        "description": "<p>Build systems</p><h2>Requirements</h2><p>Master's degree</p>",
-    }
-    return (
-        '<meta name="description" content="SUMMARY">'
-        '<script type="application/ld+json">'
-        + json.dumps({"@graph": [node]})
-        + "</script><main>Unrelated body</main>"
+async def test_ashby_host_policy_is_api_only() -> None:
+    assert target("ashby").hosts == frozenset({"api.ashbyhq.com"})
+    assert "api.ashbyhq.com" in HOSTS
+    assert "jobs.ashbyhq.com" not in HOSTS
+
+
+async def test_ashby_bypasses_cached_board_validators() -> None:
+    from datetime import UTC, datetime
+
+    from stage.http import ValidatorCache
+
+    cache = ValidatorCache()
+    cache.record(
+        ASHBY_ENDPOINT,
+        httpx.Headers(
+            {"etag": '"board-version"', "last-modified": "Wed, 18 Nov 2026 12:00:00 GMT"}
+        ),
+        datetime.now(UTC),
     )
+    assert cache.conditional_headers(ASHBY_ENDPOINT)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert "if-none-match" not in request.headers
+        assert "if-modified-since" not in request.headers
+        return httpx.Response(200, json={"jobs": [posting("ashby")]})
+
+    async with HttpClient(
+        allowed_hosts=target("ashby").hosts,
+        cache=cache,
+        jitter=False,
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        assert await fetch_target(target("ashby"), client) is not None
+        assert client.request_count == 1
 
 
-async def test_ashby_uses_only_matching_jsonld_and_does_not_claim_full() -> None:
-    async with client_for(httpx.Response(200, text=ashby_page())) as client:
+async def test_ashby_respects_response_size_bound() -> None:
+    from stage.http import ResponseTooLargeError
+    from stage.http.client import MAX_RESPONSE_BYTES
+
+    async with client_for(
+        httpx.Response(200, headers={"content-length": str(MAX_RESPONSE_BYTES + 1)}, content="{}")
+    ) as client:
+        with pytest.raises(ResponseTooLargeError):
+            await fetch_target(target("ashby"), client)
+        assert client.request_count == 1
+
+
+async def test_ashby_selects_exact_job_from_board_and_claims_full() -> None:
+    other = posting("ashby") | {"id": "11111111-1111-1111-1111-111111111111"}
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"jobs": [other, posting("ashby"), other]})
+
+    async with HttpClient(
+        allowed_hosts=target("ashby").hosts,
+        jitter=False,
+        transport=httpx.MockTransport(respond),
+    ) as client:
         result = await fetch_target(target("ashby"), client)
-    assert result is not None and not result.complete
-    assert "Master's degree" in result.description
-    assert "SUMMARY" not in result.description
-    assert "Unrelated" not in result.description
+        assert client.request_count == 1
+    assert len(requests) == 1 and str(requests[0].url) == ASHBY_ENDPOINT
+    assert requests[0].method == "GET"
+    assert result is not None and result.complete and not result.limitation
+    assert result.description == posting("ashby")["descriptionPlain"]
 
 
 @pytest.mark.parametrize(
-    "page",
+    "patch",
     [
-        '<meta name="description" content="Summary"><main>Body</main>',
-        '<script type="application/ld+json">invalid</script>',
-        ashby_page(URLS["ashby"].replace(UUID, "11111111-1111-1111-1111-111111111111")),
-        ashby_page(URLS["ashby"].replace("Acme", "Other")),
-        ashby_page() + ashby_page(),
-        ashby_page().replace("JobPosting", "WebPage"),
+        {"id": "11111111-1111-1111-1111-111111111111"},
+        {"id": None},
+        {"jobUrl": URLS["ashby"].replace("Acme", "Other")},
+        {"jobUrl": URLS["ashby"].replace(UUID, "11111111-1111-1111-1111-111111111111")},
+        {"jobUrl": "https://evil.test/Acme/" + UUID},
+        {"jobUrl": None},
+        {"title": ""},
+        {"isListed": False},
+        {"isListed": None},
+        {"isListed": "true"},
+        {"descriptionPlain": {}, "descriptionHtml": []},
+        {"descriptionPlain": None, "descriptionHtml": "<p></p><script>snippet</script>"},
+        {"descriptionPlain": " ", "descriptionHtml": None, "description": "snippet"},
     ],
 )
-async def test_ashby_rejects_missing_mismatched_or_ambiguous_body(page: str) -> None:
-    async with client_for(httpx.Response(200, text=page)) as client:
+async def test_ashby_rejects_mismatched_unlisted_or_unusable_job(patch: dict[str, object]) -> None:
+    async with client_for(httpx.Response(200, json={"jobs": [posting("ashby") | patch]})) as client:
         assert await fetch_target(target("ashby"), client) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        {},
+        {"jobs": None},
+        {"jobs": {}},
+        {"jobs": []},
+        {"jobs": [None, "snippet", {}]},
+        {"jobs": [posting("ashby"), posting("ashby")]},
+        {"jobs": [posting("ashby"), {"id": UUID}]},
+        {"jobs": [posting("ashby")], "errors": []},
+    ],
+)
+async def test_ashby_rejects_missing_malformed_or_duplicate_board(payload: object) -> None:
+    async with client_for(httpx.Response(200, content=json.dumps(payload))) as client:
+        assert await fetch_target(target("ashby"), client) is None
+
+
+@pytest.mark.parametrize("field", ["id", "jobUrl", "title", "isListed"])
+async def test_ashby_requires_identity_and_listing_fields(field: str) -> None:
+    job = posting("ashby")
+    del job[field]
+    async with client_for(httpx.Response(200, json={"jobs": [job]})) as client:
+        assert await fetch_target(target("ashby"), client) is None
+
+
+@pytest.mark.parametrize(
+    ("plain", "markup", "expected"),
+    [
+        (None, "<h2>Requirements</h2><p>Master's degree</p>", "Requirements\nMaster's degree"),
+        ("", "<p>Build systems</p>", "Build systems"),
+        ("Use vector<T> and x < y", "<p>HTML fallback</p>", "Use vector<T> and x < y"),
+    ],
+)
+async def test_ashby_full_description_fields(plain: object, markup: str, expected: str) -> None:
+    job = posting("ashby") | {"descriptionPlain": plain, "descriptionHtml": markup}
+    async with client_for(httpx.Response(200, json={"jobs": [job]})) as client:
+        result = await fetch_target(target("ashby"), client)
+    assert result is not None and result.complete and result.description == expected
 
 
 async def test_forged_target_never_reaches_network() -> None:
@@ -276,6 +390,11 @@ async def test_forged_target_never_reaches_network() -> None:
         replace(target("lever"), url="https://evil.test/"),
         replace(target("lever"), provider="unknown"),
         replace(target("lever"), account="../other"),
+        replace(target("ashby"), url=URLS["ashby"]),
+        replace(target("ashby"), url=ASHBY_ENDPOINT + "?account=Other"),
+        replace(target("ashby"), account="Other"),
+        replace(target("ashby"), account="../Other"),
+        replace(target("ashby"), posting_id="not-a-uuid"),
     ]:
         assert await fetch_target(forged, client) is None
     client.get_json.assert_not_called()
@@ -285,7 +404,7 @@ async def test_forged_target_never_reaches_network() -> None:
 @pytest.mark.parametrize("provider", list(URLS))
 async def test_revalidation_is_explicit(provider: str) -> None:
     client = AsyncMock(spec=HttpClient)
-    method = client.get_text if provider == "ashby" else client.get_json
+    method = client.get_json
     method.return_value.status = 304
     method.return_value.not_modified = True
     resolved = target(provider)
@@ -293,35 +412,39 @@ async def test_revalidation_is_explicit(provider: str) -> None:
     method.assert_awaited_once_with(resolved.url, revalidate=True)
 
 
-async def test_caller_shared_budget_and_host_policy_are_preserved() -> None:
+@pytest.mark.parametrize("provider", ["greenhouse", "ashby"])
+async def test_caller_shared_budget_and_host_policy_are_preserved(provider: str) -> None:
     posture = RatePosture(min_interval_s=0, max_requests_per_run=1)
     budgets: dict[str, HostBudget] = {}
     transport = httpx.MockTransport(
-        lambda _request: httpx.Response(200, json=posting("greenhouse"))
+        lambda _request: httpx.Response(
+            200, json={"jobs": [posting(provider)]} if provider == "ashby" else posting(provider)
+        )
     )
     for attempt in range(2):
         async with HttpClient(
-            allowed_hosts=target("greenhouse").hosts,
+            allowed_hosts=target(provider).hosts,
             budgets=budgets,
             posture=posture,
             transport=transport,
             jitter=False,
         ) as client:
             if attempt == 0:
-                assert await fetch_target(target("greenhouse"), client) is not None
+                assert await fetch_target(target(provider), client) is not None
             else:
                 with pytest.raises(HostBudgetExceededError):
-                    await fetch_target(target("greenhouse"), client)
+                    await fetch_target(target(provider), client)
 
 
-async def test_redirect_failure_is_not_followed_or_swallowed() -> None:
+@pytest.mark.parametrize("provider", ["greenhouse", "ashby"])
+async def test_redirect_failure_is_not_followed_or_swallowed(provider: str) -> None:
     from stage.http import RedirectNotAllowedError
 
     async with client_for(
         httpx.Response(302, headers={"location": "https://evil.test/job"})
     ) as client:
         with pytest.raises(RedirectNotAllowedError):
-            await fetch_target(target("greenhouse"), client)
+            await fetch_target(target(provider), client)
 
 
 @pytest.mark.parametrize("value", [None, 123, [], {}])
@@ -336,20 +459,24 @@ def test_non_string_url_has_no_target(value: object) -> None:
         httpx.Response(200, text="<html>Error page</html>"),
     ],
 )
-async def test_http_and_unreadable_errors_propagate(response: httpx.Response) -> None:
+@pytest.mark.parametrize("provider", ["greenhouse", "ashby"])
+async def test_http_and_unreadable_errors_propagate(
+    response: httpx.Response, provider: str
+) -> None:
     from stage.http import HttpError
 
     async with client_for(response) as client:
         with pytest.raises(HttpError):
-            await fetch_target(target("greenhouse"), client)
+            await fetch_target(target(provider), client)
 
 
-async def test_client_host_allowlist_cannot_be_bypassed() -> None:
+@pytest.mark.parametrize("provider", ["greenhouse", "ashby"])
+async def test_client_host_allowlist_cannot_be_bypassed(provider: str) -> None:
     from stage.http import HostNotAllowedError
 
     async with HttpClient(allowed_hosts=frozenset()) as client:
         with pytest.raises(HostNotAllowedError):
-            await fetch_target(target("greenhouse"), client)
+            await fetch_target(target(provider), client)
         assert client.request_count == 0
 
 

@@ -1,9 +1,7 @@
 import html
-import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
@@ -17,7 +15,7 @@ HOSTS = frozenset(
     {
         "boards-api.greenhouse.io",
         "api.lever.co",
-        "jobs.ashbyhq.com",
+        "api.ashbyhq.com",
         "apply.workable.com",
     }
 )
@@ -84,7 +82,7 @@ def target_for_url(url: object) -> HydrationTarget | None:
                 "ashby",
                 account,
                 posting_id,
-                f"https://jobs.ashbyhq.com/{account}/{posting_id}",
+                f"https://api.ashbyhq.com/posting-api/job-board/{account}",
             )
     elif host == "apply.workable.com":
         match = re.fullmatch(rf"/({_SLUG})/j/([A-Z0-9]{{10}})/?", path)
@@ -124,46 +122,33 @@ def _body(value: object) -> str:
     return soup.get_text("\n", strip=True)
 
 
-def _json_nodes(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, list):
-        return [node for entry in value for node in _json_nodes(entry)]
-    if isinstance(value, dict):
-        return [value, *_json_nodes(value.get("@graph"))]
-    return []
-
-
-def _ashby_detail(target: HydrationTarget, page: str) -> HydrationDetail | None:
-    matches: list[str] = []
-    soup = BeautifulSoup(page, "html.parser")
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            nodes = _json_nodes(json.loads(script.get_text()))
-        except (ValueError, RecursionError):
-            continue
-        for node in nodes:
-            kind = node.get("@type")
-            if kind != "JobPosting" and not (isinstance(kind, list) and "JobPosting" in kind):
-                continue
-            linked = node.get("url")
-            if not isinstance(linked, str) or target_for_url(linked) != target:
-                continue
-            if not _has_text(node.get("title")):
-                continue
-            body = _body(node.get("description"))
-            if body:
-                matches.append(body)
+def _ashby_detail(target: HydrationTarget, data: dict[str, object]) -> HydrationDetail | None:
+    jobs = data.get("jobs")
+    if not isinstance(jobs, list):
+        return None
+    # Count by UUID before validating the row so a malformed duplicate cannot
+    # silently turn an ambiguous response into a unique match.
+    matches = [job for job in jobs if isinstance(job, dict) and job.get("id") == target.posting_id]
     if len(matches) != 1:
         return None
-    return HydrationDetail(
-        matches[0],
-        False,
-        "Ashby JSON-LD may be abridged; full page-body equivalence is unverified",
-    )
+    job = matches[0]
+    if target_for_url(job.get("jobUrl")) != target or not _has_text(job.get("title")):
+        return None
+    # Unlisted or missing jobs are inconclusive, never evidence of closure.
+    if job.get("isListed") is not True:
+        return None
+    plain = job.get("descriptionPlain")
+    body = plain.strip() if isinstance(plain, str) else ""
+    if not body:
+        body = _body(job.get("descriptionHtml"))
+    return HydrationDetail(body, True) if body else None
 
 
 def _json_detail(target: HydrationTarget, data: object) -> HydrationDetail | None:
     if not isinstance(data, dict) or any(key in data for key in ("error", "errors")):
         return None
+    if target.provider == "ashby":
+        return _ashby_detail(target, data)
     if target.provider == "greenhouse":
         identity = data.get("id")
         if type(identity) is not int or str(identity) != target.posting_id:
@@ -229,11 +214,6 @@ async def fetch_target(
 ) -> HydrationDetail | None:
     if not _canonical(target):
         return None
-    if target.provider == "ashby":
-        response = await client.get_text(target.url, revalidate=True)
-        if response.status != 200 or response.not_modified:
-            return None
-        return _ashby_detail(target, response.text)
     response_json = await client.get_json(target.url, revalidate=True)
     if response_json.status != 200 or response_json.not_modified:
         return None
