@@ -168,6 +168,7 @@ async def test_a_search_answer_names_the_search_it_ran(stored: Path) -> None:
         "location": None,
         "role": None,
         "level": None,
+        "industries": None,
         "term": None,
         "language": None,
         "company": None,

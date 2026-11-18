@@ -5,9 +5,9 @@ from urllib.parse import urlsplit
 
 from stage.classify.role import classify_role
 from stage.classify.scope import Rejection
-from stage.domain import DegreeRequirement, Job, JobLevel, RejectionReason
+from stage.domain import DegreeRequirement, Job, JobLevel, RejectionReason, RoleCategory
 from stage.domain.liveness import AWAITING_PAGE, PAGED_SOURCES
-from stage.lexicon import QualifiedTitles, eligibility_lexicon, fold
+from stage.lexicon import QualifiedTitles, eligibility_lexicon, fold, occupation_lexicon
 
 _ORDER = ("phd", "masters", "bachelors")
 _EARLY_CAREER = frozenset({JobLevel.NEW_GRAD, JobLevel.ENTRY})
@@ -21,7 +21,7 @@ _NOT_A_DEGREE = re.compile(
 @dataclass(frozen=True, slots=True)
 class EligibilityVerdict:
     degree_requirement: DegreeRequirement
-    work_auth_flag: bool
+    work_auth_flag: bool | None
     matched_phrase: str = ""
     work_auth_phrase: str = ""
 
@@ -103,7 +103,7 @@ def resolve_eligibility(job: Job) -> EligibilityVerdict:
         )
     return EligibilityVerdict(
         degree_requirement=degree,
-        work_auth_flag=bool(excluded),
+        work_auth_flag=True if excluded else False if job.description.strip() else None,
         matched_phrase=matched or excluded,
         work_auth_phrase=excluded,
     )
@@ -123,6 +123,9 @@ def _restricted_hit(haystack: str, phrases: frozenset[str], alternatives: frozen
 
 
 def screen_degree_scope(job: Job) -> Rejection | None:
+    roles = {job.role, *job.roles}
+    if RoleCategory.QUANT in roles or any(role.value in occupation_lexicon() for role in roles):
+        return None
     lexicon = eligibility_lexicon()
 
     body = fold(f"{job.title_raw} {job.description}")
@@ -186,6 +189,11 @@ def screen_is_cs_role(job: Job) -> Rejection | None:
     lexicon = eligibility_lexicon()
     title = fold(job.title_raw)
     title_verdict = classify_role(job.title_raw, source_category=job.signals.category)
+
+    if any(
+        role.value in occupation_lexicon() for role in (title_verdict.role, *title_verdict.roles)
+    ):
+        return None
 
     phrase = _hit(title, lexicon.excluded_titles)
     exception = _hit(title, lexicon.technical_title_exceptions)

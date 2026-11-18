@@ -16,6 +16,7 @@ from stage.domain import (
     JobStatus,
     LocationBucket,
     QuarantinedJob,
+    RoleCategory,
     board_of,
 )
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
@@ -24,7 +25,7 @@ from stage.storage.copies import (
     copies_of_rejected,
     duplicate_candidates,
     followers_of_rejected,
-    restore_copies,
+    freshly_observed_eligible_copies,
 )
 from stage.storage.repository import Resolver, SourceBatch, SourceBatchResult
 from stage.storage.rows import (
@@ -436,10 +437,50 @@ class BatchWriter(Store):
         return sum(1 for ident, linked in after.items() if before.get(ident) != linked)
 
     def apply_source_batch(self, batch: SourceBatch) -> SourceBatchResult:
+        from stage.lexicon import occupation_lexicon
+
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
+            if batch.detail_queue_cursor is not None:
+                conn.execute(
+                    "INSERT INTO detail_queue_cursors (source, cursor) VALUES (?, ?) "
+                    "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor",
+                    (batch.source, batch.detail_queue_cursor),
+                )
+            without_description = [
+                job
+                for job in batch.jobs
+                if not job.description.strip()
+                and not any(
+                    role is RoleCategory.QUANT or role.value in occupation_lexicon()
+                    for role in (job.role, *job.roles)
+                )
+            ]
+            old_reasons = {
+                str(row["id"]): str(row["reason"])
+                for row in conn.execute(
+                    f"SELECT id, reason FROM quarantine WHERE id IN {EACH}",
+                    (listed(j.id for j in without_description),),
+                )
+            }
+            eligible_copies = freshly_observed_eligible_copies(
+                conn, batch, [job for job in without_description if job.id in old_reasons]
+            )
+            held_without_body = {
+                job.id
+                for job in without_description
+                if job.id in old_reasons and job.id not in eligible_copies
+            }
+            conn.executemany(
+                "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
+                [
+                    (to_text(job.last_seen), job.id)
+                    for job in without_description
+                    if job.id in held_without_body
+                ],
+            )
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
             known = _first_seen(seen, started)
             arriving = [job for job in batch.jobs if job.id not in seen]
@@ -447,7 +488,17 @@ class BatchWriter(Store):
             jobs = tuple(
                 replace(job, first_seen=known[job.id]) if job.id in known else job
                 for job in batch.jobs
-                if not seen.get(job.id, _UNSEEN).expired(cutoff) and job.id not in retired
+                if not seen.get(job.id, _UNSEEN).expired(cutoff)
+                and job.id not in retired
+                and job.id not in held_without_body
+            )
+            jobs = tuple(
+                replace(job, work_auth_flag=None)
+                if seen.get(job.id, _UNSEEN).rejected is not None
+                and not job.description.strip()
+                and job.work_auth_flag is False
+                else job
+                for job in jobs
             )
             held = _held_closed(conn, batch, jobs)
             jobs = tuple(
@@ -460,7 +511,6 @@ class BatchWriter(Store):
                 f"DELETE FROM quarantine WHERE id IN {EACH}",
                 (listed(job.id for job in jobs if seen.get(job.id, _UNSEEN).rejected is not None),),
             )
-            restore_copies(conn, {job.id: job.level for job in jobs})
             _crawl(conn, batch, stamp)
             touched = _touch(conn, batch, stamp)
             closed, shut, held_urls = _close(conn, batch, stamp)

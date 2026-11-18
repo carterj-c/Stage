@@ -67,6 +67,7 @@ class SourceBatch:
     quarantined: tuple[QuarantinedJob, ...] = field(default_factory=tuple)
     resolve_duplicates: Resolver | None = None
 
+    detail_queue_cursor: str | None = None
     closes_whole_source: bool = False
     list_sources: frozenset[str] = frozenset()
 
@@ -114,6 +115,12 @@ class Repository(Protocol):
         pass
 
     def load_workday_crawls(self) -> Mapping[str, WorkdayCrawl]:
+        pass
+
+    def list_rescreen_jobs(self, after_id: str, limit: int) -> list[Job]:
+        pass
+
+    def list_rescreen_quarantine(self, after_id: str, limit: int) -> list[QuarantinedJob]:
         pass
 
     def list_quarantined(self, filters: QuarantineFilters) -> list[QuarantinedJob]:

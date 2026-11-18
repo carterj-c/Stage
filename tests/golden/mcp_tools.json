@@ -4,8 +4,6 @@
     "title": "Search postings",
     "description": "Find open early-career postings, newest first. Internships unless a level is chosen. Without words it lists postings first seen in the last 14 days. With words it searches titles, employers and descriptions across every stored posting. Filters combine. Postings the user hid are always left out. Returns 25 by default and up to 100, or 250 compact rows per page with all_matches. Every answer has the total, a next_cursor when more remain, and when Stage last synced.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "words": {
           "default": "",
@@ -45,6 +43,13 @@
                 "infra",
                 "embedded",
                 "general-cs",
+                "project-management",
+                "program-management",
+                "production",
+                "finance",
+                "investment-research",
+                "investment-banking",
+                "risk",
                 "unknown"
               ],
               "type": "string"
@@ -64,6 +69,9 @@
                 "internship",
                 "new-grad",
                 "entry",
+                "mid",
+                "senior",
+                "unknown",
                 "all"
               ],
               "type": "string"
@@ -73,8 +81,32 @@
             }
           ],
           "default": null,
-          "description": "internship, new-grad, entry, or all. Internships only by default",
+          "description": "internship, new-grad, entry, mid, senior, unknown, or all. Internships only by default",
           "title": "Level"
+        },
+        "industries": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "gaming",
+                  "fashion",
+                  "fintech",
+                  "tech",
+                  "finance",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Employer industries (OR). Curated and incomplete. Unknown means unclassified",
+          "title": "Industries"
         },
         "term": {
           "anyOf": [
@@ -186,7 +218,9 @@
           "title": "Cursor"
         }
       },
-      "title": "search_postingsArguments"
+      "type": "object",
+      "title": "search_postingsArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,
@@ -206,8 +240,6 @@
     "title": "Get postings",
     "description": "Read every stored detail of up to 10 postings by id: description, dates, apply link, other copies of the same posting, and the user's tracking status and note. A posting Stage no longer stores comes back from the copy saved when the user tracked it.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "ids": {
           "description": "Up to 10 posting ids from search_postings or get_tracker",
@@ -225,7 +257,9 @@
       "required": [
         "ids"
       ],
-      "title": "get_postingsArguments"
+      "type": "object",
+      "title": "get_postingsArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,
@@ -246,10 +280,10 @@
     "title": "Database status",
     "description": "How fresh and how big Stage's database is: when it last synced, open and recent posting counts, breakdowns by location, role, term, language and source, rejected postings by reason, and the last few syncs.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {},
-      "title": "database_statusArguments"
+      "type": "object",
+      "title": "database_statusArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,
@@ -270,8 +304,6 @@
     "title": "Review rejected postings",
     "description": "List postings Stage rejected and why: outside Canada and the US, not an internship or early-career role, graduate degrees only, not a computer science role, or a role Stage could not place. Use it when the user asks why a posting is missing.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "reason": {
           "anyOf": [
@@ -332,7 +364,9 @@
           "title": "Cursor"
         }
       },
-      "title": "review_quarantineArguments"
+      "type": "object",
+      "title": "review_quarantineArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,
@@ -353,8 +387,6 @@
     "title": "Check sources",
     "description": "Health of the job boards and feeds Stage reads: open rows per source (a posting two sources list counts in both), errors, volume drops, blocked hosts, and failing, stale, refusing or gone boards. It only reads and changes nothing.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "include_boards": {
           "default": false,
@@ -363,7 +395,9 @@
           "type": "boolean"
         }
       },
-      "title": "check_sourcesArguments"
+      "type": "object",
+      "title": "check_sourcesArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,
@@ -384,8 +418,6 @@
     "title": "Track postings",
     "description": "Set the status, date or note of postings in the user's tracker: saved, applied, interviewing, offer, rejected, withdrawn or hidden. Hidden postings stop appearing in searches. Earlier statuses stay in each posting's history. Use only when the user asks.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "ids": {
           "description": "Posting ids to track",
@@ -459,7 +491,9 @@
       "required": [
         "ids"
       ],
-      "title": "track_postingsArguments"
+      "type": "object",
+      "title": "track_postingsArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": false,
@@ -473,8 +507,6 @@
     "title": "Untrack postings",
     "description": "Stop tracking postings. This deletes their status, note and history, and hidden postings show again. Use only when the user asks.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "ids": {
           "description": "Posting ids to stop tracking. Hidden ones show in searches again",
@@ -492,7 +524,9 @@
       "required": [
         "ids"
       ],
-      "title": "untrack_postingsArguments"
+      "type": "object",
+      "title": "untrack_postingsArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": false,
@@ -513,8 +547,6 @@
     "title": "Undo a tracking change",
     "description": "Put postings back exactly as they were before a track_postings call, with the undo token that call returned: status, date, note and history, or not tracked at all. A token works once, and only until Stage restarts. A posting that changed again since is left alone. Use only when the user asks.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "undo": {
           "description": "The undo token from a track_postings answer",
@@ -527,7 +559,9 @@
       "required": [
         "undo"
       ],
-      "title": "undo_trackingArguments"
+      "type": "object",
+      "title": "undo_trackingArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": false,
@@ -541,8 +575,6 @@
     "title": "Get tracker",
     "description": "The postings the user tracks, latest change first, with status, date, note and history, plus counts: applications sent, applied in the last 7 and 30 days, and how many heard back. Hidden postings are listed only when status is hidden.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "status": {
           "anyOf": [
@@ -589,7 +621,9 @@
           "title": "Cursor"
         }
       },
-      "title": "get_trackerArguments"
+      "type": "object",
+      "title": "get_trackerArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,
@@ -610,10 +644,10 @@
     "title": "Get preferences",
     "description": "The user's saved places, roles, levels, terms, followed and avoided employers, and note about themselves, plus the values each field accepts.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {},
-      "title": "get_preferencesArguments"
+      "type": "object",
+      "title": "get_preferencesArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": true,
@@ -634,8 +668,6 @@
     "title": "Set preferences",
     "description": "Save the user's preferences, which mine uses to narrow searches. Each field sent replaces what was saved, fields left out stay as they are, and an empty list clears one. Use only when the user asks.",
     "inputSchema": {
-      "type": "object",
-      "additionalProperties": false,
       "properties": {
         "locations": {
           "anyOf": [
@@ -671,7 +703,14 @@
                   "quant",
                   "infra",
                   "embedded",
-                  "general-cs"
+                  "general-cs",
+                  "project-management",
+                  "program-management",
+                  "production",
+                  "finance",
+                  "investment-research",
+                  "investment-banking",
+                  "risk"
                 ],
                 "type": "string"
               },
@@ -693,7 +732,10 @@
                 "enum": [
                   "internship",
                   "new-grad",
-                  "entry"
+                  "entry",
+                  "mid",
+                  "senior",
+                  "unknown"
                 ],
                 "type": "string"
               },
@@ -707,6 +749,30 @@
           "default": null,
           "description": "Levels to keep. An empty list keeps internships only",
           "title": "Levels"
+        },
+        "industries": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "gaming",
+                  "fashion",
+                  "fintech",
+                  "tech",
+                  "finance",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Employer industries (OR). Curated and incomplete. Unknown means unclassified",
+          "title": "Industries"
         },
         "terms": {
           "anyOf": [
@@ -785,7 +851,9 @@
           "type": "boolean"
         }
       },
-      "title": "set_preferencesArguments"
+      "type": "object",
+      "title": "set_preferencesArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": false,

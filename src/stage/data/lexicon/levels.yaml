@@ -1,6 +1,6 @@
-# Titles that screen_internship rejects or does not recognise are sorted here into new-grad,
-# entry, or not early-career. Order of precedence: blocked phrases are scrubbed, seniority wins,
-# then new-grad markers, then entry markers.
+# Titles without internship evidence are classified from explicit career markers.
+# Senior and mid markers win, then new-grad and entry markers. Occupation nouns
+# such as manager carry no level evidence. Numeric seniority grades remain unknown.
 
 seniority:
   - senior
@@ -8,25 +8,14 @@ seniority:
   - staff
   - principal
   - lead
-  - manager
   - director
   - head of
-  - architect
   - vp
   - vice president
   - chief
   - distinguished
-  - supervisor
-  - mid level
-  - intermediate
-  - experienced
-  - expert
-  - gestionnaire
   - directeur
   - directrice
-  - responsable
-  - superviseur
-  - intermediaire
 
 # Phrases that look like early-career markers but name something else. They are removed from the
 # title before the markers are read.
@@ -180,3 +169,9 @@ seniority_levels:
   - "3"
   - "4"
   - "5"
+
+# Explicit mid-career markers; occupation nouns alone carry no seniority evidence.
+mid:
+  - mid level
+  - intermediate
+  - intermediaire

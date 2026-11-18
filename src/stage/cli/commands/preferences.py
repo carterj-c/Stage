@@ -6,6 +6,7 @@ import typer
 
 from stage.cli.options import (
     DatabaseOption,
+    IndustryOption,
     InvalidOptionError,
     JsonOption,
     _database,
@@ -65,6 +66,7 @@ def prefs(
             ),
         ),
     ] = None,
+    industry: IndustryOption = None,
     term: Annotated[
         list[str] | None,
         typer.Option("--term", metavar="TERM", help='Terms such as summer-2027, "" clears'),
@@ -104,7 +106,9 @@ def prefs(
         preferences_lock,
     )
 
-    changing = bool(location or role or level or term or follow or avoid) or about is not None
+    changing = (
+        bool(location or role or level or industry or term or follow or avoid) or about is not None
+    )
     if clear and (changing or show):
         _refuse("[red]--clear cannot be combined with other options.[/red]")
     if show and changing:
@@ -129,6 +133,7 @@ def prefs(
         ("--location", location),
         ("--role", role),
         ("--level", level),
+        ("--industry", industry),
         ("--term", term),
         ("--follow", follow),
         ("--avoid", avoid),
@@ -141,7 +146,7 @@ def prefs(
             with preferences_lock():
                 current = load_preferences().preferences
                 updated = _updated(
-                    current, known, location, role, level, term, follow, avoid, about
+                    current, known, location, role, level, term, follow, avoid, about, industry
                 )
                 _finish(updated, known, db, as_json, before=current)
         except (PreferenceError, InvalidOptionError) as exc:
@@ -176,6 +181,7 @@ def _updated(
     follow: list[str] | None,
     avoid: list[str] | None,
     about: str | None,
+    industry: list[str] | None = None,
 ) -> "Preferences":
     from stage.services.preferences import revise_preferences
 
@@ -185,6 +191,7 @@ def _updated(
         locations=location or None,
         roles=role or None,
         levels=level or None,
+        industries=industry or None,
         terms=_terms(term) if term else None,
         follow=follow or None,
         avoid=avoid or None,
@@ -281,7 +288,7 @@ def _guided(
         current.about,
         lambda v: parse_about(v[0]),
     )
-    return Preferences(locations, roles, terms, follow, avoid, about, levels)
+    return Preferences(locations, roles, terms, follow, avoid, about, levels, current.industries)
 
 
 def _finish(

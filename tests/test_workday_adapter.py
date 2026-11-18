@@ -1782,3 +1782,197 @@ async def test_one_open_crawl_does_not_stop_the_other_boards_being_fetched() -> 
     assert len(fetched) == len(boards), (
         "an open crawl on one board must not turn the whole run into a resume-only pass"
     )
+
+
+@respx.mock
+@pytest.mark.parametrize("old_reason", ["out-of-scope-degree", "out-of-scope-location"])
+async def test_quarantine_is_refetched_from_workday_before_release(
+    tmp_path: Path,
+    old_reason: str,
+) -> None:
+    from stage.classify.scope import Rejection, to_quarantined
+    from stage.domain import DegreeRequirement, Job, RejectionReason, job_id
+    from stage.services.maintenance import rescreen
+    from stage.services.screening import normalize_batch
+    from stage.storage import SourceBatch, open_repository
+
+    ident = job_id("workday", "cae-career", "R00001")
+    title = "Quantitative Research Intern"
+    job = Job(
+        id=ident,
+        source="workday",
+        company="CAE",
+        title_raw=title,
+        title_normalized=title.lower(),
+        apply_url_raw="https://example.test/1",
+        description="",
+        location_raw="Montreal, QC",
+        first_seen=NOW,
+        last_seen=NOW,
+    )
+    held = to_quarantined(job, Rejection(RejectionReason(old_reason), "old rejection"))
+    detail = "https://cae.wd3.myworkdayjobs.com/wday/cxs/cae/career/job/Montreal/x_R00001"
+    detail_request = respx.get(detail).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "jobPostingInfo": {"jobDescription": "<p>PhD required. Must be a US citizen.</p>"}
+            },
+        )
+    )
+    respx.post(CXS).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "total": 1,
+                "jobPostings": [
+                    {
+                        "title": title,
+                        "externalPath": "/job/Montreal/x_R00001",
+                        "locationsText": "Montreal",
+                        "bulletFields": ["R00001"],
+                    }
+                ],
+                "facets": _facets(),
+            },
+        )
+    )
+    async with open_repository(tmp_path / "workday.db") as repo:
+        await repo.mark_screened(0)
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="workday",
+                run_started_at=NOW - timedelta(days=1),
+                quarantined=(held,),
+                detail_fetches=(DetailFetch(id=ident, resolved=True),),
+            )
+        )
+        result = await rescreen(repo, now=NOW)
+        assert result.quarantine_waiting == 1 and result.released == 0
+        assert await repo.get_job(ident) is None
+        queue = await repo.detail_queue("workday", 50)
+        assert ident in queue
+        async with _client(UNPACED) as client:
+            fetched = await WorkdayAdapter().fetch(
+                _company(workday_facet="timeType:f-intern"), client, NOW, None, queue
+            )
+        assert detail_request.called
+        kept, rejected = normalize_batch(fetched.jobs)
+        assert len(kept) == 1 and not rejected
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="workday",
+                run_started_at=NOW,
+                jobs=kept,
+                detail_fetches=tuple(
+                    entry for entry in fetched.detail_fetches if isinstance(entry, DetailFetch)
+                ),
+            )
+        )
+        restored = await repo.get_job(ident)
+        assert restored is not None
+        assert restored.degree_requirement is DegreeRequirement.PHD
+        assert restored.work_auth_flag
+        assert await repo.detail_queue("workday", 50) == []
+
+
+@respx.mock
+async def test_two_syncs_advance_past_missing_quarantined_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from stage.classify.scope import Rejection, to_quarantined
+    from stage.domain import Job, JobLevel, RejectionReason, RoleCategory, job_id
+    from stage.services.sync import sync
+    from stage.storage import SourceBatch, open_repository
+
+    monkeypatch.setattr(WorkdayAdapter, "detail_budget", 2)
+    company = _company(workday_facet="timeType:f-intern")
+
+    def job(index: int, title: str) -> Job:
+        return Job(
+            id=job_id("workday", "cae-career", f"R{index:05d}"),
+            source="workday",
+            company="CAE",
+            title_raw=title,
+            title_normalized=title.lower(),
+            apply_url_raw=f"https://example.test/{index}",
+            description="",
+            location_raw="Montreal, QC",
+            first_seen=NOW,
+            last_seen=NOW,
+        )
+
+    old = tuple(
+        to_quarantined(
+            job(i, "Quantitative Research Intern"),
+            Rejection(RejectionReason.OUT_OF_SCOPE_LOCATION, "old"),
+        )
+        for i in (1, 2)
+    )
+    current = replace(
+        job(3, "Quantitative Research Intern"),
+        role=RoleCategory.QUANT,
+        level=JobLevel.INTERNSHIP,
+        work_auth_flag=None,
+    )
+    title = "Quantitative Research Intern"
+    respx.post(CXS).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "total": 1,
+                "jobPostings": [_posting(3, title)],
+                "facets": _facets(),
+            },
+        )
+    )
+    detail_url = (
+        "https://cae.wd3.myworkdayjobs.com/wday/cxs/cae/career/"
+        "job/Montreal/Quantitative-Research-Intern_R00003"
+    )
+    detail = respx.get(detail_url).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "jobPostingInfo": {"jobDescription": "<p>PhD required. Must be a US citizen.</p>"},
+            },
+        )
+    )
+    async with open_repository(tmp_path / "queue.db") as repo:
+        await repo.apply_source_batch(
+            SourceBatch(source="workday", run_started_at=NOW, quarantined=old)
+        )
+        first = await repo.detail_queue("workday", 2)
+        assert set(first) == {entry.id for entry in old}
+        async for _ in sync(
+            repo,
+            [company],
+            sources=("workday",),
+            now_fn=lambda: NOW,
+            force_refresh=True,
+            still_open=False,
+            close_orphans=False,
+        ):
+            pass
+        assert detail.call_count == 0
+        assert await repo.get_job(current.id) is not None
+        second = await repo.detail_queue("workday", 2)
+        assert current.id in second
+        later = NOW + timedelta(hours=1)
+        async for _ in sync(
+            repo,
+            [company],
+            sources=("workday",),
+            now_fn=lambda: later,
+            force_refresh=True,
+            still_open=False,
+            close_orphans=False,
+        ):
+            pass
+        assert detail.call_count == 1
+        fetched = await repo.get_job(current.id)
+        assert fetched is not None and fetched.work_auth_flag is True
+        assert "PhD required" in fetched.description

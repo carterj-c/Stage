@@ -9,6 +9,7 @@ from stage.domain.enums import (
     LocationBucket,
     RoleCategory,
 )
+from stage.domain.industry import Industry
 
 DEFAULT_WINDOW_DAYS = 14
 DEFAULT_LIMIT = 50
@@ -32,6 +33,7 @@ class JobFilters:
     limit: int | None = DEFAULT_LIMIT
     locations: frozenset[LocationBucket] = frozenset()
     roles: frozenset[RoleCategory] = frozenset()
+    industries: frozenset[Industry] = frozenset()
     levels: frozenset[JobLevel] = frozenset()
     terms: frozenset[str] = frozenset()
     avoid_companies: frozenset[str] = frozenset()

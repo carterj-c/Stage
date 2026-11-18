@@ -157,8 +157,8 @@
       "input": {
         "source": "lever",
         "company": "Behaviour Interactive",
-        "title_raw": "Stagiaire en g\u00e9nie logiciel",
-        "location_raw": "Montr\u00e9al, QC, Canada",
+        "title_raw": "Stagiaire en génie logiciel",
+        "location_raw": "Montréal, QC, Canada",
         "signals": {}
       },
       "expected": {
@@ -176,7 +176,7 @@
       "input": {
         "source": "smartrecruiters",
         "company": "Ubisoft",
-        "title_raw": "Stagiaire en science des donn\u00e9es",
+        "title_raw": "Stagiaire en science des données",
         "location_raw": "Montreal, QC, Canada",
         "signals": {}
       },
@@ -195,8 +195,8 @@
       "input": {
         "source": "lever",
         "company": "Genetec",
-        "title_raw": "Stagiaire en cybers\u00e9curit\u00e9",
-        "location_raw": "Montr\u00e9al, Qu\u00e9bec, Canada",
+        "title_raw": "Stagiaire en cybersécurité",
+        "location_raw": "Montréal, Québec, Canada",
         "signals": {}
       },
       "expected": {
@@ -215,7 +215,7 @@
         "source": "lever",
         "company": "Mila",
         "title_raw": "Stagiaire en apprentissage automatique",
-        "location_raw": "Montr\u00e9al, QC",
+        "location_raw": "Montréal, QC",
         "signals": {}
       },
       "expected": {
@@ -233,7 +233,7 @@
       "input": {
         "source": "greenhouse",
         "company": "CAE",
-        "title_raw": "Stagiaire en micrologiciel embarqu\u00e9",
+        "title_raw": "Stagiaire en micrologiciel embarqué",
         "location_raw": "Saint-Laurent, QC, Canada",
         "signals": {}
       },
@@ -252,7 +252,7 @@
       "input": {
         "source": "smartrecruiters",
         "company": "Ubisoft",
-        "title_raw": "D\u00e9veloppeur\u00b7euse logiciel stagiaire",
+        "title_raw": "Développeur·euse logiciel stagiaire",
         "location_raw": "Montreal, QC, Canada",
         "signals": {}
       },
@@ -290,7 +290,7 @@
       "input": {
         "source": "greenhouse",
         "company": "Shopify",
-        "title_raw": "Winter 2027 Co-op \u2014 Backend Developer",
+        "title_raw": "Winter 2027 Co-op — Backend Developer",
         "location_raw": "Ottawa, ON, Canada",
         "signals": {}
       },
@@ -512,10 +512,13 @@
         "signals": {}
       },
       "expected": {
-        "kept": false,
-        "reason": "not-early-career",
-        "matched_phrase": "staff",
-        "location": "montreal"
+        "kept": true,
+        "location": "montreal",
+        "remote_scope": null,
+        "term": "unknown",
+        "role": "swe",
+        "level": "senior",
+        "language": "en"
       }
     },
     {
@@ -529,8 +532,8 @@
       },
       "expected": {
         "kept": false,
-        "reason": "not-early-career",
-        "matched_phrase": "internal auditor",
+        "reason": "unknown-cs-role",
+        "matched_phrase": "no matching CS role or source category",
         "location": "canada"
       }
     },
@@ -545,8 +548,8 @@
       },
       "expected": {
         "kept": false,
-        "reason": "not-early-career",
-        "matched_phrase": "manager",
+        "reason": "unknown-cs-role",
+        "matched_phrase": "no matching CS role or source category",
         "location": "usa"
       }
     },
@@ -579,10 +582,13 @@
         "signals": {}
       },
       "expected": {
-        "kept": false,
-        "reason": "not-early-career",
-        "matched_phrase": "manager",
-        "location": "usa"
+        "kept": true,
+        "location": "usa",
+        "remote_scope": null,
+        "term": "unknown",
+        "role": "program-management",
+        "level": "unknown",
+        "language": "en"
       }
     },
     {
@@ -625,7 +631,7 @@
       "input": {
         "source": "simplify",
         "company": "Autodesk",
-        "title_raw": "Software Developer Intern - Stagiaire en D\u00e9veloppement Logiciel",
+        "title_raw": "Software Developer Intern - Stagiaire en Développement Logiciel",
         "location_raw": "Canada",
         "signals": {}
       },
@@ -644,15 +650,18 @@
       "input": {
         "source": "smartrecruiters",
         "company": "Ubisoft",
-        "title_raw": "Programmeur\u00b7se Senior C++ - Apprentissage automatique",
+        "title_raw": "Programmeur·se Senior C++ - Apprentissage automatique",
         "location_raw": "Montreal, QC, Canada",
         "signals": {}
       },
       "expected": {
-        "kept": false,
-        "reason": "not-early-career",
-        "matched_phrase": "senior",
-        "location": "montreal"
+        "kept": true,
+        "location": "montreal",
+        "remote_scope": null,
+        "term": "unknown",
+        "role": "ml-ai",
+        "level": "senior",
+        "language": "unknown"
       }
     },
     {
@@ -679,8 +688,8 @@
       "input": {
         "source": "greenhouse",
         "company": "Banque Nationale",
-        "title_raw": "Stagiaire en finance quantitative, \u00c9t\u00e9 2027",
-        "location_raw": "Montr\u00e9al, QC, Canada",
+        "title_raw": "Stagiaire en finance quantitative, Été 2027",
+        "location_raw": "Montréal, QC, Canada",
         "signals": {}
       },
       "expected": {
@@ -699,7 +708,7 @@
         "source": "greenhouse",
         "company": "Videotron",
         "title_raw": "Stagiaire en infrastructure infonuagique",
-        "location_raw": "Montr\u00e9al, QC, Canada",
+        "location_raw": "Montréal, QC, Canada",
         "signals": {}
       },
       "expected": {
@@ -717,8 +726,8 @@
       "input": {
         "source": "greenhouse",
         "company": "CAE",
-        "title_raw": "Stagiaire en logiciel embarqu\u00e9",
-        "location_raw": "Montr\u00e9al, QC, Canada",
+        "title_raw": "Stagiaire en logiciel embarqué",
+        "location_raw": "Montréal, QC, Canada",
         "signals": {}
       },
       "expected": {
@@ -774,8 +783,8 @@
       "input": {
         "source": "lever",
         "company": "Behaviour Interactive",
-        "title_raw": "D\u00e9veloppeur logiciel - nouveau dipl\u00f4m\u00e9",
-        "location_raw": "Montr\u00e9al, QC, Canada",
+        "title_raw": "Développeur logiciel - nouveau diplômé",
+        "location_raw": "Montréal, QC, Canada",
         "signals": {}
       },
       "expected": {
@@ -798,10 +807,13 @@
         "signals": {}
       },
       "expected": {
-        "kept": false,
-        "reason": "not-early-career",
-        "matched_phrase": "engineer iii",
-        "location": "montreal"
+        "kept": true,
+        "location": "montreal",
+        "remote_scope": null,
+        "term": "unknown",
+        "role": "swe",
+        "level": "unknown",
+        "language": "en"
       }
     },
     {
@@ -814,10 +826,13 @@
         "signals": {}
       },
       "expected": {
-        "kept": false,
-        "reason": "not-early-career",
-        "matched_phrase": "senior",
-        "location": "montreal"
+        "kept": true,
+        "location": "montreal",
+        "remote_scope": null,
+        "term": "unknown",
+        "role": "swe",
+        "level": "senior",
+        "language": "en"
       }
     },
     {
@@ -831,8 +846,8 @@
       },
       "expected": {
         "kept": false,
-        "reason": "not-early-career",
-        "matched_phrase": "associate counsel",
+        "reason": "unknown-cs-role",
+        "matched_phrase": "no matching CS role or source category",
         "location": "montreal"
       }
     },

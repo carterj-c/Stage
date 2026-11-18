@@ -64,9 +64,7 @@ def test_early_career_titles_get_their_level(title: str, level: JobLevel, phrase
 @pytest.mark.parametrize(
     "title",
     [
-        "Senior Software Engineer I",
         "Associate Counsel",
-        "Associate Director",
         "Campus Recruiter",
         "Graduate Research Assistant",
         "Application Developer Levels 1 - 5",
@@ -79,14 +77,11 @@ def test_early_career_titles_get_their_level(title: str, level: JobLevel, phrase
         "Software Engineer I-IV",
         "Software Engineer 1 - 3",
         "Software Engineer I or II",
-        "Staff Software Engineer",
         "Associate Account Executive",
         "Wealth Associate",
         "Data Entry Clerk",
-        "Area Manager - Graduate Program",
         "Graduate Research Scientist",
         "Campus Security Officer",
-        "Lead Software Engineer, New Grad Platform",
     ],
 )
 def test_experienced_and_lookalike_titles_are_rejected(title: str) -> None:
@@ -99,7 +94,7 @@ def test_experienced_and_lookalike_titles_are_rejected(title: str) -> None:
 
 def test_seniority_beats_an_early_career_marker() -> None:
     assert screen_level("Senior Software Engineer I").matched_phrase == "senior"
-    assert screen_level("Junior to Senior Software Engineer").rejected
+    assert screen_level("Junior to Senior Software Engineer").level is JobLevel.SENIOR
     assert screen_level("Associate Software Engineer II").matched_phrase == "engineer ii"
 
 
@@ -154,10 +149,9 @@ def test_screening_keeps_new_grad_and_entry_postings_with_their_level() -> None:
         "Software Engineer Intern": JobLevel.INTERNSHIP,
         "Software Engineer, New Grad": JobLevel.NEW_GRAD,
         "Junior Software Engineer": JobLevel.ENTRY,
+        "Senior Software Engineer": JobLevel.SENIOR,
     }
-    assert [(entry.reason, entry.matched_phrase) for entry in rejected] == [
-        (RejectionReason.NOT_EARLY_CAREER, "senior")
-    ]
+    assert not rejected
 
 
 def test_a_new_grad_title_still_needs_a_cs_role() -> None:
@@ -293,7 +287,7 @@ def test_a_new_grad_feed_stands_in_for_a_title_with_no_marker() -> None:
     ],
 )
 def test_the_new_grad_hint_never_overrides_seniority_or_a_blocked_phrase(title: str) -> None:
-    assert screen_level(title, employment_type="new grad").rejected, title
+    assert screen_level(title, employment_type="new grad").level is not JobLevel.NEW_GRAD, title
 
 
 def test_a_title_marker_beats_the_new_grad_hint() -> None:
@@ -320,9 +314,10 @@ def test_screening_keeps_a_markerless_title_from_a_new_grad_feed() -> None:
     )
 
     assert [(entry.title_raw, entry.level) for entry in kept] == [
-        ("Software Engineer", JobLevel.NEW_GRAD)
+        ("Software Engineer", JobLevel.NEW_GRAD),
+        ("Software Engineer", JobLevel.UNKNOWN),
     ]
-    assert [entry.reason for entry in rejected] == [RejectionReason.NOT_EARLY_CAREER]
+    assert not rejected
 
 
 @pytest.mark.parametrize(

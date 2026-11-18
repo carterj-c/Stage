@@ -191,6 +191,8 @@ structured_excluded:
   - campus hire
   - campus hires
 
+
+# Recognized manager occupations can use structured internship evidence from fresh listings.
 structured_only_blocked:
   - senior
   - principal

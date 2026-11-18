@@ -11,7 +11,6 @@ from stage.domain import (
     QuarantinedJob,
     RateState,
     RoleCategory,
-    SourceSignals,
 )
 from stage.storage import AsyncRepository, SourceBatch
 
@@ -77,6 +76,12 @@ class RescreenResult:
     relabelled: int = 0
     relocated: int = 0
     relinked: int = 0
+    quarantine_waiting: int = 0
+    complete: bool = True
+
+    @property
+    def recovery_complete(self) -> bool:
+        return self.complete and not self.quarantine_waiting
 
     @property
     def changed(self) -> bool:
@@ -109,12 +114,14 @@ def upgrade_note(result: RescreenResult) -> str:
     return (
         "This version of Stage screens postings differently, so it checked the ones already "
         f"stored: {counted(result.quarantined, 'posting')} now rejected, "
-        f"{counted(result.released, 'posting')} brought back."
+        f"{counted(result.released, 'posting')} brought back. "
+        f"{counted(result.quarantine_waiting, 'quarantined posting')} await a fresh "
+        "source response."
     )
 
 
 async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) -> RescreenResult:
-    from stage.domain import JobFilters
+    from stage.domain import JobFilters, QuarantineFilters
     from stage.normalize import canonical_apply_url
     from stage.paths import rules_stamp
     from stage.services.tracker import follow_recorded
@@ -128,52 +135,107 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
     )
     settled: dict[str, Job] = {}
 
+    complete = False
     for pass_number in range(RESCREEN_PASSES):
-        stored = await repository.list_jobs(
-            JobFilters(status=None, limit=RESCREEN_LIMIT, with_duplicates=True)
-        )
-        if not pass_number:
-            examined = len(stored)
-        pending = [job for job in stored if settled.get(job.id) != job]
-        candidates, rejected = _reclassifications(pending) if pending else ((), ())
-        rejected_ids = {entry.id for entry in rejected}
-        changed: list[Job] = []
-        for job, candidate in zip(pending, candidates, strict=True):
-            if job != candidate:
-                changed.append(candidate)
-            elif job.id not in rejected_ids:
-                settled[job.id] = job
-        if not changed and not rejected:
-            break
-        updates = tuple(entry for entry in changed if entry.id not in rejected_ids)
-        sources = {entry.source for entry in updates} | {entry.source for entry in rejected}
-        for source in sorted(sources):
-            applied = await repository.apply_source_batch(
-                SourceBatch(
-                    source=source,
-                    run_started_at=moment,
-                    jobs=tuple(entry for entry in updates if entry.source == source),
-                    quarantined=tuple(entry for entry in rejected if entry.source == source),
+        after_id = ""
+        changed_this_pass = False
+        while True:
+            stored = await repository.list_rescreen_jobs(after_id, RESCREEN_LIMIT)
+            if not stored:
+                break
+            after_id = stored[-1].id
+            if not pass_number:
+                examined += len(stored)
+            pending = [job for job in stored if settled.get(job.id) != job]
+            candidates, rejected = _reclassifications(pending) if pending else ((), ())
+            rejected_ids = {entry.id for entry in rejected}
+            changed: list[Job] = []
+            for job, candidate in zip(pending, candidates, strict=True):
+                if job != candidate:
+                    changed.append(candidate)
+                elif job.id not in rejected_ids:
+                    settled[job.id] = job
+            if not changed and not rejected:
+                continue
+            changed_this_pass = True
+            updates = tuple(entry for entry in changed if entry.id not in rejected_ids)
+            sources = {entry.source for entry in updates} | {entry.source for entry in rejected}
+            for source in sorted(sources):
+                applied = await repository.apply_source_batch(
+                    SourceBatch(
+                        source=source,
+                        run_started_at=moment,
+                        jobs=tuple(entry for entry in updates if entry.source == source),
+                        quarantined=tuple(entry for entry in rejected if entry.source == source),
+                    )
                 )
-            )
-            if applied.successors:
-                await follow_recorded(repository)
-            quarantined += applied.quarantined
-        updated += len(updates)
-    released, relabelled = await _release_reclassified_quarantine(repository, moment)
+                if applied.successors:
+                    await follow_recorded(repository)
+                quarantined += applied.quarantined
+            updated += len(updates)
+        if not changed_this_pass:
+            complete = True
+            break
+    relabelled = await _reclassify_quarantine(repository)
     relocated = await repository.refresh_quarantine_locations(_place_resolver())
     relinked = await repository.relink_duplicates(resolve_duplicates, canonical_apply_url)
-    await repository.mark_screened(rules_stamp(), at=moment)
+    waiting = await repository.count_quarantined(QuarantineFilters())
+    if complete:
+        await repository.mark_screened(rules_stamp(), at=moment)
     return RescreenResult(
         examined=examined,
         quarantined=quarantined,
         total=total,
         updated=updated,
-        released=released,
         relabelled=relabelled,
         relocated=relocated,
         relinked=relinked,
+        quarantine_waiting=waiting,
+        complete=complete,
     )
+
+
+async def _reclassify_quarantine(repository: AsyncRepository) -> int:
+    from stage.domain import RejectionReason, SourceSignals
+    from stage.lexicon import fold
+    from stage.services.screening import normalize_batch
+
+    relabelled = 0
+    after_id = ""
+    while entries := await repository.list_rescreen_quarantine(after_id, RESCREEN_LIMIT):
+        after_id = entries[-1].id
+        candidates = tuple(
+            Job(
+                id=entry.id,
+                source=entry.source,
+                company=entry.company,
+                title_raw=entry.title_raw,
+                title_normalized=fold(entry.title_raw),
+                apply_url_raw=entry.apply_url_raw,
+                description="",
+                first_seen=entry.first_seen,
+                last_seen=entry.last_seen,
+                location_raw=entry.location_raw,
+                location=entry.location,
+                remote_scope=entry.remote_scope,
+                signals=SourceSignals(
+                    employment_type=entry.employment_type, category=entry.category
+                ),
+            )
+            for entry in entries
+            if entry.reason is not RejectionReason.OUT_OF_SCOPE_DEGREE
+        )
+        _, rejected = normalize_batch(candidates)
+        previous = {entry.id: entry for entry in entries}
+        relabelled += await repository.relabel_quarantine(
+            tuple(
+                entry
+                for entry in rejected
+                if (entry.reason, entry.matched_phrase)
+                != (previous[entry.id].reason, previous[entry.id].matched_phrase)
+            )
+        )
+    return relabelled
 
 
 def _current_term(job: Job) -> str:
@@ -237,7 +299,8 @@ def _reclassifications(
     for job in jobs:
         place = listed_place(job.location_raw, job.apply_url_raw, job.title_raw)
         location = resolve_listing(place, job.title_raw)
-        title_role = classify_role(job.title_raw, job.description).role
+        verdict = classify_role(job.title_raw, job.description, job.signals.category)
+        title_role = verdict.role
         candidate = replace(
             job,
             company=shown_company(job.company),
@@ -246,6 +309,7 @@ def _reclassifications(
             location=location.bucket,
             remote_scope=location.remote_scope,
             role=title_role if title_role is not RoleCategory.UNKNOWN else job.role,
+            roles=verdict.roles,
             term=_current_term(job),
         )
         eligibility = resolve_eligibility(candidate)
@@ -267,68 +331,3 @@ def _reclassifications(
             rejected.append(to_quarantined(candidate, rejection))
         candidates.append(candidate)
     return tuple(candidates), tuple(rejected)
-
-
-async def _release_reclassified_quarantine(
-    repository: AsyncRepository,
-    moment: datetime,
-) -> tuple[int, int]:
-    from stage.domain import QuarantineFilters, RejectionReason
-    from stage.lexicon import fold
-    from stage.services.screening import Screener
-
-    remaining = RESCREEN_LIMIT
-    entries: list[QuarantinedJob] = []
-    for reason in (
-        RejectionReason.UNKNOWN_CS_ROLE,
-        RejectionReason.NOT_A_CS_ROLE,
-        RejectionReason.OUT_OF_SCOPE_LOCATION,
-        RejectionReason.NOT_AN_INTERNSHIP,
-        RejectionReason.NOT_EARLY_CAREER,
-    ):
-        if not remaining:
-            break
-        found = await repository.list_quarantined(QuarantineFilters(reason=reason, limit=remaining))
-        entries.extend(found)
-        remaining -= len(found)
-    candidates = tuple(
-        Job(
-            id=entry.id,
-            source=entry.source,
-            company=entry.company,
-            title_raw=entry.title_raw,
-            title_normalized=fold(entry.title_raw),
-            apply_url_raw=entry.apply_url_raw,
-            description="",
-            first_seen=entry.first_seen,
-            last_seen=entry.last_seen,
-            location_raw=entry.location_raw,
-            location=entry.location,
-            remote_scope=entry.remote_scope,
-            signals=SourceSignals(employment_type=entry.employment_type, category=entry.category),
-        )
-        for entry in entries
-    )
-    screener = Screener()
-    try:
-        kept, rejected = await screener(candidates)
-    finally:
-        screener.close()
-    known = {entry.id: entry for entry in entries}
-    sharpened = tuple(
-        entry
-        for entry in rejected
-        if (previous := known.get(entry.id)) is not None
-        and (previous.reason, previous.matched_phrase) != (entry.reason, entry.matched_phrase)
-    )
-    relabelled = await repository.relabel_quarantine(sharpened)
-    for source in sorted({entry.source for entry in kept}):
-        await repository.apply_source_batch(
-            SourceBatch(
-                source=source,
-                run_started_at=moment,
-                jobs=tuple(entry for entry in kept if entry.source == source),
-                resolve_duplicates=resolve_duplicates,
-            )
-        )
-    return len(kept), relabelled

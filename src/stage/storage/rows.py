@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from collections.abc import Sequence
 from datetime import datetime
@@ -75,7 +76,9 @@ JOB_COLUMNS = (
     "term",
     "role",
     "level",
+    "roles",
     "work_auth_flag",
+    "work_auth_known",
     "degree_requirement",
     "compensation",
     "employment_type",
@@ -203,7 +206,16 @@ _FETCHED_AGAIN = (
     "attempts = detail_fetches.attempts + 1",
     "failed = excluded.failed",
 )
-UPSERT_DETAIL = upsert("detail_fetches", _FETCH_COLUMNS, "id", _FETCHED_AGAIN)
+_DETAIL_AGAIN = (
+    *refreshed("fetched_at", "resolved"),
+    "attempts = CASE WHEN (EXISTS (SELECT 1 FROM quarantine q WHERE q.id = detail_fetches.id) "
+    "OR EXISTS (SELECT 1 FROM jobs j WHERE j.id = detail_fetches.id)) "
+    "AND detail_fetches.fetched_at < "
+    "(SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed') "
+    "THEN 1 ELSE detail_fetches.attempts + 1 END",
+    "failed = excluded.failed",
+)
+UPSERT_DETAIL = upsert("detail_fetches", _FETCH_COLUMNS, "id", _DETAIL_AGAIN)
 UPSERT_HEIR = upsert("detail_fetches", _FETCH_COLUMNS, "id", refreshed("source", "fetched_at"))
 UPSERT_CHECK = (
     f"INSERT INTO detail_fetches ({', '.join(_FETCH_COLUMNS)}) "
@@ -278,7 +290,8 @@ def job_from(row: sqlite3.Row) -> Job:
         term=row["term"],
         role=RoleCategory(row["role"]),
         level=JobLevel(row["level"]),
-        work_auth_flag=bool(row["work_auth_flag"]),
+        roles=tuple(RoleCategory(role) for role in json.loads(row["roles"])),
+        work_auth_flag=bool(row["work_auth_flag"]) if row["work_auth_known"] else None,
         degree_requirement=DegreeRequirement(row["degree_requirement"]),
         compensation=row["compensation"],
         signals=SourceSignals(
@@ -311,7 +324,9 @@ def job_params(job: Job) -> tuple[Any, ...]:
         job.term,
         job.role.value,
         job.level.value,
-        int(job.work_auth_flag),
+        json.dumps([role.value for role in job.roles]),
+        int(job.work_auth_flag is True),
+        int(job.work_auth_flag is not None),
         job.degree_requirement.value,
         job.compensation,
         job.signals.employment_type,

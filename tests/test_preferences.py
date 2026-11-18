@@ -673,8 +673,10 @@ def test_the_setup_asks_plain_questions() -> None:
 
     assert questions == [
         "Locations (montreal, canada, usa)",
-        "Roles (swe, security, data, ml-ai, quant, infra, embedded, general-cs)",
-        "Levels (internship, new-grad, entry)",
+        "Roles (swe, security, data, ml-ai, quant, infra, embedded, general-cs, "
+        "project-management, program-management, production, finance, investment-research, "
+        "investment-banking, risk)",
+        "Levels (internship, new-grad, entry, mid, senior, unknown)",
         "Terms (such as summer-2027)",
         "Employers to follow, included from any place",
         "Employers to leave out",

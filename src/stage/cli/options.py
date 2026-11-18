@@ -265,8 +265,17 @@ RoleOption = Annotated[
         metavar="ROLE",
         help=(
             "Filter by role: swe, security, data, ml-ai, quant, infra, embedded, "
-            "general-cs, unknown"
+            "general-cs, project-management, program-management, production, finance, "
+            "investment-research, investment-banking, risk, unknown"
         ),
+    ),
+]
+IndustryOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--industry",
+        metavar="INDUSTRY",
+        help="Employer industry: gaming, fashion, fintech, tech, finance, unknown. Repeat for OR",
     ),
 ]
 LevelOption = Annotated[
@@ -274,7 +283,7 @@ LevelOption = Annotated[
     typer.Option(
         "--level",
         metavar="LEVEL",
-        help="Filter by level: internship (the default), new-grad, entry, all",
+        help="Level: internship (default), new-grad, entry, mid, senior, unknown, all",
     ),
 ]
 LanguageOption = Annotated[
@@ -465,12 +474,20 @@ def _filters(
     company: list[str] | None,
     limit: int | None,
     level: list[str] | None = None,
+    industry: list[str] | None = None,
     mine: bool = False,
     as_json: bool = False,
 ) -> "tuple[JobFilters, Preferences | None]":
     from stage.domain import JobFilters, Language, LocationBucket, RoleCategory
     from stage.domain.filters import with_default_levels
+    from stage.domain.preferences import PreferenceError, parse_industries
 
+    try:
+        industries = frozenset(parse_industries(industry or []))
+    except PreferenceError as exc:
+        raise InvalidOptionError(str(exc)) from exc
+    if industry and not industries:
+        raise InvalidOptionError("--industry needs a value")
     chosen, levels = _validated_level(_one(level, "--level"))
     filters = JobFilters(
         location=_parse_enum(_one(location, "--location"), LocationBucket, "--location"),
@@ -482,6 +499,7 @@ def _filters(
         company=_one(company, "--company"),
         limit=limit,
         levels=levels,
+        industries=industries,
     )
     return _mine(filters, as_json) if mine else (with_default_levels(filters), None)
 

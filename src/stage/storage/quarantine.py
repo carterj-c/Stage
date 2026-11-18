@@ -25,6 +25,12 @@ def _where(filters: QuarantineFilters) -> tuple[str, list[Any]]:
 
 
 class QuarantineStore(Store):
+    def list_rescreen_quarantine(self, after_id: str, limit: int) -> list[QuarantinedJob]:
+        rows = self._conn.execute(
+            "SELECT * FROM quarantine WHERE id > ? ORDER BY id LIMIT ?", (after_id, limit)
+        )
+        return [quarantined_from(row) for row in rows]
+
     def list_quarantined(self, filters: QuarantineFilters) -> list[QuarantinedJob]:
         where, params = _where(filters)
         clause, bounds = limit_clause(filters.limit, filters.offset)

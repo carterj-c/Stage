@@ -68,7 +68,7 @@ async def _reasons(repository: object) -> dict[str, tuple[str, str]]:
     return {row.id: (row.reason.value, row.matched_phrase) for row in rows}
 
 
-async def test_a_stored_not_an_internship_row_comes_back_with_its_level(db_path: Path) -> None:
+async def test_not_an_internship_rows_wait_for_a_source_refresh(db_path: Path) -> None:
     async with open_repository(db_path) as repository:
         await _store(
             repository,
@@ -83,13 +83,9 @@ async def test_a_stored_not_an_internship_row_comes_back_with_its_level(db_path:
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 2
-        assert await _levels(repository) == {"grad": JobLevel.NEW_GRAD, "entry": JobLevel.ENTRY}
-        assert await _reasons(repository) == {
-            "senior": ("not-early-career", "senior"),
-            "plain": ("not-early-career", "no early-career marker in title"),
-            "generalist": ("unknown-cs-role", NO_ROLE),
-        }
+        assert result.released == 0 and result.quarantine_waiting == 5
+        assert await _levels(repository) == {}
+        assert len(await _reasons(repository)) == 5
 
 
 async def test_a_second_pass_finds_nothing_to_release_or_relabel(db_path: Path) -> None:
@@ -122,7 +118,7 @@ async def test_an_ended_internship_term_keeps_its_not_an_internship_reason(db_pa
         assert await _reasons(repository) == {"old": ("not-an-internship", "summer 2025 has ended")}
 
 
-async def test_the_release_budget_serves_the_older_reasons_before_not_an_internship(
+async def test_quarantined_rows_do_not_consume_the_stored_posting_page_limit(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(maintenance, "RESCREEN_LIMIT", 2)
@@ -135,15 +131,12 @@ async def test_the_release_budget_serves_the_older_reasons_before_not_an_interns
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 2
-        assert await _levels(repository) == {
-            "role0": JobLevel.INTERNSHIP,
-            "role1": JobLevel.INTERNSHIP,
-        }
-        assert list(await _reasons(repository)) == ["grad"], "the new reason takes what is left"
+        assert result.released == 0 and result.quarantine_waiting == 3
+        assert await _levels(repository) == {}
+        assert set(await _reasons(repository)) == {"role0", "role1", "grad"}
 
 
-async def test_a_not_early_career_row_is_released_when_a_lexicon_change_makes_it_pass(
+async def test_a_quarantined_row_stays_held_after_a_lexicon_change(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from stage.lexicon import level_lexicon
@@ -151,9 +144,8 @@ async def test_a_not_early_career_row_is_released_when_a_lexicon_change_makes_it
     async with open_repository(db_path) as repository:
         await _store(repository, [_entry("trainee", "Software Engineering Trainee")])
         await rescreen(repository, now=NOW)
-        assert await _reasons(repository) == {
-            "trainee": ("not-early-career", "no early-career marker in title")
-        }
+        assert len(await _reasons(repository)) == 1
+        assert await _levels(repository) == {}
 
         real = level_lexicon()
         monkeypatch.setattr(
@@ -162,12 +154,12 @@ async def test_a_not_early_career_row_is_released_when_a_lexicon_change_makes_it
         )
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 1
-        assert await _levels(repository) == {"trainee": JobLevel.ENTRY}
-        assert await _reasons(repository) == {}
+        assert result.updated == 0 and result.quarantine_waiting == 1
+        assert await _levels(repository) == {}
+        assert len(await _reasons(repository)) == 1
 
 
-async def test_not_early_career_rows_are_scanned_after_every_other_reason(
+async def test_quarantined_reasons_wait_independently_of_the_page_limit(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(maintenance, "RESCREEN_LIMIT", 2)
@@ -186,8 +178,8 @@ async def test_not_early_career_rows_are_scanned_after_every_other_reason(
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 2
-        assert set(await _levels(repository)) == {"older", "middle"}
+        assert result.released == 0 and result.quarantine_waiting == 4
+        assert await _levels(repository) == {}
 
 
 async def test_a_markerless_new_grad_feed_row_keeps_its_reason_through_a_rescreen(
@@ -222,11 +214,11 @@ async def test_a_markerless_new_grad_feed_row_keeps_its_reason_through_a_rescree
         assert result.released == 0
         assert {row.id: (row.reason.value, row.employment_type) for row in rows} == {
             "simplify-new-grad:acme:1": ("out-of-scope-location", "new grad"),
-            "greenhouse:acme:2": ("not-early-career", ""),
+            "greenhouse:acme:2": ("out-of-scope-location", ""),
         }
 
 
-async def test_a_markerless_new_grad_feed_row_is_released_once_it_would_pass(
+async def test_a_markerless_new_grad_feed_row_needs_a_fresh_body(
     db_path: Path,
 ) -> None:
     async with open_repository(db_path) as repository:
@@ -247,12 +239,12 @@ async def test_a_markerless_new_grad_feed_row_is_released_once_it_would_pass(
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 1
-        assert await _levels(repository) == {"simplify-new-grad:acme:1": JobLevel.NEW_GRAD}
-        assert await _reasons(repository) == {}
+        assert result.released == 0 and result.quarantine_waiting == 1
+        assert await _levels(repository) == {}
+        assert len(await _reasons(repository)) == 1
 
 
-async def test_a_row_rejected_for_its_source_category_is_not_released_by_a_rescreen(
+async def test_a_quarantined_row_with_conflicting_source_category_needs_a_fresh_body(
     db_path: Path,
 ) -> None:
     async with open_repository(db_path) as repository:
@@ -274,13 +266,11 @@ async def test_a_row_rejected_for_its_source_category_is_not_released_by_a_rescr
         rows = await repository.list_quarantined(QuarantineFilters(limit=None))
 
         assert (result.released, result.relabelled) == (0, 0)
-        assert [(row.reason.value, row.category) for row in rows] == [
-            ("not-early-career", "New Graduates")
-        ]
+        assert len(rows) == 1
         assert await _levels(repository) == {}
 
 
-async def test_a_stored_posting_in_an_excluded_category_is_quarantined_and_stays_there(
+async def test_a_stored_posting_with_conflicting_category_keeps_unknown_level(
     db_path: Path,
 ) -> None:
     stored = Job(
@@ -308,9 +298,9 @@ async def test_a_stored_posting_in_an_excluded_category_is_quarantined_and_stays
         result = await rescreen(repository, now=NOW)
         rows = await repository.list_quarantined(QuarantineFilters(limit=None))
 
-        assert (result.quarantined, result.released) == (1, 0)
-        assert [(row.id, row.category) for row in rows] == [("custom:acme:1", "New Graduates")]
-        assert await _levels(repository) == {}
+        assert (result.quarantined, result.released) == (0, 0)
+        assert rows == []
+        assert await _levels(repository) == {"custom:acme:1": JobLevel.UNKNOWN}
 
 
 async def test_a_stored_posting_is_rescreened_to_its_own_level(db_path: Path) -> None:
@@ -344,9 +334,10 @@ async def test_a_stored_posting_is_rescreened_to_its_own_level(db_path: Path) ->
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.quarantined == 1
+        assert result.quarantined == 0
         assert await _levels(repository) == {
             "greenhouse:acme:intern": JobLevel.INTERNSHIP,
             "greenhouse:acme:grad": JobLevel.NEW_GRAD,
+            "greenhouse:acme:old": JobLevel.SENIOR,
         }
-        assert await _reasons(repository) == {"greenhouse:acme:old": ("not-early-career", "senior")}
+        assert await _reasons(repository) == {}

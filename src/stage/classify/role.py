@@ -2,7 +2,14 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from stage.domain import RoleCategory
-from stage.lexicon import fold, role_lexicon, role_pairs, source_role_categories
+from stage.lexicon import (
+    fold,
+    occupation_lexicon,
+    occupation_negatives,
+    role_lexicon,
+    role_pairs,
+    source_role_categories,
+)
 
 GENERAL_CS = RoleCategory.GENERAL_CS.value
 SWE = RoleCategory.SWE.value
@@ -37,6 +44,7 @@ class RoleVerdict:
     role: RoleCategory = RoleCategory.UNKNOWN
     matched: tuple[str, ...] = ()
     ambiguous: bool = False
+    roles: tuple[RoleCategory, ...] = ()
 
 
 def _specialist(hits: dict[str, list[str]]) -> str | None:
@@ -60,6 +68,33 @@ def _paired(padded: str) -> RoleVerdict | None:
 
 
 def classify_role(title: str, description: str = "", source_category: str = "") -> RoleVerdict:
+    padded_title = f" {fold(title)} "
+    occupations = {
+        category: tuple(phrase for phrase in phrases if f" {phrase} " in padded_title)
+        for category, phrases in occupation_lexicon().items()
+        if not any(
+            f" {phrase} " in padded_title for phrase in occupation_negatives().get(category, ())
+        )
+    }
+    occupations = {category: phrases for category, phrases in occupations.items() if phrases}
+    if occupations:
+        legacy = _classify_legacy(title, "", "")
+        categories = tuple(
+            sorted(
+                {RoleCategory(category) for category in occupations}
+                | ({legacy.role} if legacy.matched else set())
+            )
+        )
+        primary = max(occupations, key=lambda category: max(map(len, occupations[category])))
+        return RoleVerdict(
+            legacy.role if legacy.matched else RoleCategory(primary),
+            tuple(sorted(phrase for phrases in occupations.values() for phrase in phrases)),
+            roles=categories,
+        )
+    return _classify_legacy(title, description, source_category)
+
+
+def _classify_legacy(title: str, description: str, source_category: str) -> RoleVerdict:
     index = _by_first_token()
     declared = source_role_categories().get(fold(source_category)) if source_category else None
     for text in (title, description):

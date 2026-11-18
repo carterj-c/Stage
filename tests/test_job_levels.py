@@ -72,7 +72,14 @@ def _listed(path: Path, *flags: str) -> list[str]:
 
 
 def test_levels_are_spelled_like_the_other_values_and_start_unknown() -> None:
-    assert [level.value for level in JobLevel] == ["internship", "new-grad", "entry", "unknown"]
+    assert [level.value for level in JobLevel] == [
+        "internship",
+        "new-grad",
+        "entry",
+        "mid",
+        "senior",
+        "unknown",
+    ]
     unscreened = Job(
         id="greenhouse:acme:1",
         source="greenhouse",
@@ -101,8 +108,8 @@ def test_a_listing_shows_internships_unless_a_level_is_typed(db_path: Path) -> N
 @pytest.mark.parametrize(
     ("flags", "said"),
     [
-        (["--level", "senior"], 'Unknown level "senior"'),
-        (["--level", "unknown"], 'Unknown level "unknown"'),
+        (["--level", "executive"], 'Unknown level "executive"'),
+        (["--level", "invalid"], 'Unknown level "invalid"'),
         (["--level", ""], "--level needs a value"),
         (["--level", "entry", "--level", "all"], "--level takes one value"),
     ],
@@ -117,7 +124,7 @@ def test_a_level_stage_cannot_filter_on_is_refused(
     assert result.exit_code == 2
     assert said in _plain(result.stderr)
     if said.startswith("Unknown"):
-        assert "internship, new-grad, entry, all" in _plain(result.stderr)
+        assert "internship, new-grad, entry, mid, senior, unknown, all" in _plain(result.stderr)
 
 
 def test_saved_levels_apply_under_mine_and_a_typed_level_replaces_them(db_path: Path) -> None:
@@ -154,7 +161,7 @@ def test_preferences_choose_levels_the_way_they_choose_roles() -> None:
 def test_levels_parse_like_roles_and_refuse_what_cannot_be_chosen() -> None:
     assert parse_levels(["new-grad, ENTRY", "entry"]) == (JobLevel.NEW_GRAD, JobLevel.ENTRY)
     assert parse_levels([""]) == ()
-    for value in ("unknown", "senior"):
+    for value in ("executive", "invalid"):
         with pytest.raises(PreferenceError, match=f'Unknown level "{value}"'):
             parse_levels([value])
 
@@ -181,7 +188,7 @@ def test_saved_levels_round_trip_and_a_bad_one_is_ignored_with_a_warning() -> No
     assert json.loads(path.read_text(encoding="utf-8"))["levels"] == ["entry", "new-grad"]
     assert load_preferences().preferences == saved
 
-    path.write_text(json.dumps({"format": 1, "levels": ["senior"]}), encoding="utf-8")
+    path.write_text(json.dumps({"format": 1, "levels": ["invalid"]}), encoding="utf-8")
     loaded = load_preferences()
     assert loaded.preferences.levels == ()
     assert any("levels was ignored" in problem for problem in loaded.problems)
@@ -193,13 +200,13 @@ def test_prefs_saves_and_clears_levels(db_path: Path) -> None:
     saved = runner.invoke(app, ["prefs", "--level", "new-grad,entry", "--json"])
     shown = runner.invoke(app, ["prefs", "--show"])
     cleared = runner.invoke(app, ["prefs", "--level", "", "--json"])
-    refused = runner.invoke(app, ["prefs", "--level", "senior"])
+    refused = runner.invoke(app, ["prefs", "--level", "invalid"])
 
     assert saved.exit_code == shown.exit_code == cleared.exit_code == 0, saved.output
     assert json.loads(saved.stdout)["levels"] == ["new-grad", "entry"]
     assert "Levels new-grad, entry" in _plain(shown.stdout)
     assert json.loads(cleared.stdout)["levels"] == []
-    assert refused.exit_code == 2 and 'Unknown level "senior"' in _plain(refused.stderr)
+    assert refused.exit_code == 2 and 'Unknown level "invalid"' in _plain(refused.stderr)
     assert load_preferences().preferences.levels == ()
 
 
@@ -332,7 +339,7 @@ def test_screening_labels_a_kept_posting_and_rejects_the_rest_as_not_early_caree
     kept, rejected = normalize_batch([job, _job("staff", JobLevel.UNKNOWN)])
 
     assert [entry.level for entry in kept] == [JobLevel.INTERNSHIP]
-    assert [entry.reason for entry in rejected] == [RejectionReason.NOT_EARLY_CAREER]
+    assert [entry.reason for entry in rejected] == [RejectionReason.UNKNOWN_CS_ROLE]
 
 
 def test_the_tui_filters_by_level_and_keeps_internships_by_default() -> None:
@@ -349,7 +356,7 @@ def test_the_tui_filters_by_level_and_keeps_internships_by_default() -> None:
     state.mine = True
     assert state.as_filters(Preferences(levels=(JobLevel.ENTRY,))).levels == {JobLevel.ENTRY}
     offered = [value for name, value, _, _ in filter_rows(state) if name == "level"]
-    assert offered == ["internship", "new-grad", "entry", "all"]
+    assert offered == ["internship", "new-grad", "entry", "mid", "senior", "unknown", "all"]
 
 
 def test_ai_tools_filter_by_level_and_name_it_in_the_command() -> None:

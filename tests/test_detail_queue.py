@@ -433,3 +433,75 @@ async def test_a_posting_waiting_for_its_page_is_read_first_and_decided_by_it(
     assert queued == [waiting.id], "the page decides whether it is shown, so it goes first"
     assert waiting.id not in again
     assert waiting.id in kept
+
+
+async def test_rules_change_starts_a_fresh_retry_budget_for_old_quarantined_details(
+    db_path: Path,
+) -> None:
+    from stage.domain import QuarantinedJob, RejectionReason
+
+    old = NOW - timedelta(days=1)
+    ident = "workday:acme-site:retry"
+    held = QuarantinedJob(
+        id=ident,
+        source="workday",
+        company="Acme",
+        title_raw="Risk Intern",
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        first_seen=old,
+        last_seen=old,
+        matched_phrase="PhD required",
+    )
+    async with open_repository(db_path) as repository:
+        await repository.apply_source_batch(
+            SourceBatch(source="workday", run_started_at=old, quarantined=(held,))
+        )
+        for _ in range(3):
+            await repository.apply_source_batch(
+                SourceBatch(
+                    source="workday",
+                    run_started_at=old,
+                    detail_fetches=(DetailFetch(id=ident, resolved=True),),
+                )
+            )
+        await repository.mark_screened(0)
+        await repository.mark_screened(1, at=NOW)
+        assert await repository.detail_queue("workday", 50) == [ident]
+        for count in range(3):
+            await repository.apply_source_batch(
+                SourceBatch(
+                    source="workday",
+                    run_started_at=NOW + timedelta(minutes=count + 1),
+                    detail_fetches=(DetailFetch(id=ident, failed=True),),
+                )
+            )
+            assert (ident in await repository.detail_queue("workday", 50)) is (count < 2)
+
+
+async def test_rules_change_resets_retry_budget_for_a_restored_job(db_path: Path) -> None:
+    old = NOW - timedelta(days=1)
+    ident = "workday:acme-site:restored"
+    job = _job(ident, source="workday", work_auth_flag=None)
+    async with open_repository(db_path) as repository:
+        await repository.apply_source_batch(
+            SourceBatch(source="workday", run_started_at=old, jobs=(job,))
+        )
+        for _ in range(3):
+            await repository.apply_source_batch(
+                SourceBatch(
+                    source="workday",
+                    run_started_at=old,
+                    detail_fetches=(DetailFetch(id=ident, resolved=True),),
+                )
+            )
+        await repository.mark_screened(0)
+        await repository.mark_screened(1, at=NOW)
+        assert await repository.detail_queue("workday", 50) == [ident]
+        await repository.apply_source_batch(
+            SourceBatch(
+                source="workday",
+                run_started_at=NOW + timedelta(minutes=1),
+                detail_fetches=(DetailFetch(id=ident, failed=True),),
+            )
+        )
+        assert await repository.detail_queue("workday", 50) == [ident]

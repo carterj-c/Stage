@@ -106,6 +106,7 @@ def posting_row(job: Job, status: ApplicationStatus | None) -> dict[str, object]
         "location": full_place(job.location_raw, job.location.value),
         "region": job.location.value,
         "role": job.role.value,
+        "roles": [role.value for role in (job.roles or (job.role,))],
         "level": job.level.value,
         "term": job.term,
         "first_seen": day(job.first_seen),
@@ -150,6 +151,8 @@ def posting_detail(detail: PostingDetail, entry: TrackedPosting | None) -> dict[
         "last_seen": day(job.last_seen),
         "source": job.source,
         "description": description[:DESCRIPTION_LIMIT],
+        "work_auth_restricted": job.work_auth_flag,
+        "degree_requirement": job.degree_requirement.value,
     }
     if len(description) > DESCRIPTION_LIMIT:
         found["description_truncated"] = True

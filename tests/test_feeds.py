@@ -7,7 +7,7 @@ import httpx
 import pytest
 import respx
 
-from stage.domain import Job, JobLevel, JobStatus, RejectionReason
+from stage.domain import Job, JobLevel, JobStatus
 from stage.http import HttpClient, profile
 from stage.normalize import canonical_apply_url, is_tracker_url
 from stage.services.screening import normalize_batch
@@ -163,11 +163,10 @@ async def test_a_new_grad_listing_with_no_title_marker_is_kept_as_new_grad(
         "Software Engineer": JobLevel.NEW_GRAD,
         "Junior Software Engineer": JobLevel.ENTRY,
         "Software Engineering Intern": JobLevel.INTERNSHIP,
+        "Senior Software Engineer": JobLevel.SENIOR,
+        "Software Engineer II": JobLevel.UNKNOWN,
     }
-    assert {entry.title_raw: entry.reason for entry in rejected} == {
-        "Senior Software Engineer": RejectionReason.NOT_EARLY_CAREER,
-        "Software Engineer II": RejectionReason.NOT_EARLY_CAREER,
-    }
+    assert not rejected
 
 
 @respx.mock
@@ -184,8 +183,8 @@ async def test_the_internship_feed_still_sends_no_employment_type(run_time: date
     assert result.jobs[0].signals.employment_type == ""
     assert result.jobs[0].signals.terms == ("Summer 2027",)
     kept, rejected = normalize_batch(list(result.jobs))
-    assert not kept, "a markerless title from the internship list is still not an early-career job"
-    assert len(rejected) == 1
+    assert kept[0].level is JobLevel.UNKNOWN
+    assert not rejected
 
 
 @respx.mock

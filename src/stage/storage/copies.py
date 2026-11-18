@@ -1,20 +1,21 @@
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import lru_cache
 
 from stage.domain import (
     Job,
-    JobLevel,
+    JobStatus,
     QuarantinedJob,
     RejectionReason,
     SourceSignals,
     board_of,
     source_rank,
 )
+from stage.domain.liveness import PAGED_SOURCES
 from stage.storage.repository import Resolver, SourceBatch
-from stage.storage.rows import OPEN, UPSERT_JOB, job_from, job_params, quarantined_from
-from stage.storage.sql import EACH, fold_company, listed
+from stage.storage.rows import OPEN, job_from, quarantined_from
+from stage.storage.sql import EACH, fold_company, listed, to_text
 
 COPY_PREFIX = "copy of "
 _COPY_GLOB = f"{COPY_PREFIX}*"
@@ -87,6 +88,7 @@ def as_job(entry: QuarantinedJob, duplicate_of: str | None = None) -> Job:
         apply_url_raw=entry.apply_url_raw,
         apply_url_canonical=canonical(entry.apply_url_raw),
         description="",
+        work_auth_flag=None,
         first_seen=entry.first_seen,
         last_seen=entry.last_seen,
         location_raw=entry.location_raw,
@@ -116,6 +118,53 @@ def _main_copy(resolve: Resolver, job: Job, candidates: Sequence[Job]) -> str:
         if link.duplicate_id == job.id:
             return link.canonical_id
     return ""
+
+
+def freshly_observed_eligible_copies(
+    conn: sqlite3.Connection, batch: SourceBatch, jobs: Sequence[Job]
+) -> frozenset[str]:
+    from stage.classify import screen_degree_scope
+
+    if batch.resolve_duplicates is None or not jobs:
+        return frozenset()
+    observed = {
+        job.id: job
+        for job in jobs
+        if job.source == batch.source
+        and job.status is JobStatus.OPEN
+        and to_text(job.last_seen) >= to_text(batch.run_started_at)
+    }
+    rows = conn.execute(
+        f"SELECT id, matched_phrase, last_seen FROM quarantine WHERE reason = ? AND id IN {EACH}",
+        (_DEGREE, listed(observed)),
+    )
+    inherited = {
+        str(row["id"]): (copied_from(str(row["matched_phrase"]))[0], str(row["last_seen"]))
+        for row in rows
+    }
+    origins = {origin for origin, _ in inherited.values() if origin}
+    parents = {
+        job.id: job
+        for job in map(
+            job_from,
+            conn.execute(
+                "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = j.id "
+                f"WHERE j.id IN {EACH} AND j.source IN {EACH} AND j.status = ? "
+                "AND j.duplicate_of IS NULL AND d.source = j.source "
+                "AND d.resolved = 1 AND d.failed = 0 AND d.fetched_at = j.last_seen",
+                (listed(origins), listed(PAGED_SOURCES), OPEN),
+            ),
+        )
+    }
+    return frozenset(
+        ident
+        for ident, (origin, last_observed) in inherited.items()
+        if (parent := parents.get(origin)) is not None
+        and parent.description.strip()
+        and to_text(parent.last_seen) >= last_observed
+        and _main_copy(batch.resolve_duplicates, observed[ident], (parent,)) == origin
+        and screen_degree_scope(replace(observed[ident], description=parent.description)) is None
+    )
 
 
 class _Near[T]:
@@ -213,23 +262,6 @@ def followers_of_rejected(
             if _main_copy(resolve, candidate, (probe,)) == main_id:
                 followers[candidate.id] = _rejected_copy(candidate, *_origin(main))
     return tuple(followers.values())
-
-
-def restore_copies(conn: sqlite3.Connection, accepted: Mapping[str, JobLevel]) -> None:
-    if not accepted:
-        return
-    rows = conn.execute(
-        "SELECT * FROM quarantine WHERE reason = ? AND matched_phrase GLOB ?", (_DEGREE, _COPY_GLOB)
-    )
-    back = [
-        replace(as_job(entry, origin), level=accepted[origin])
-        for entry in map(quarantined_from, rows)
-        if (origin := copied_from(entry.matched_phrase)[0]) in accepted
-    ]
-    if not back:
-        return
-    conn.executemany(UPSERT_JOB, [job_params(job) for job in back])
-    conn.execute(f"DELETE FROM quarantine WHERE id IN {EACH}", (listed(job.id for job in back),))
 
 
 def _degree_roots(conn: sqlite3.Connection) -> dict[str, QuarantinedJob]:

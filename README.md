@@ -20,7 +20,7 @@ Free and open source. No account, no hosted service, no telemetry.
 
 ![python](https://img.shields.io/static/v1?label=python&message=3.12%20%7C%203.13%20%7C%203.14&color=4a9eff&logo=python&logoColor=white)
 
-![tests](https://img.shields.io/static/v1?label=tests&message=6%2C289&color=44bb00) ![coverage](https://img.shields.io/static/v1?label=coverage&message=94%25&color=44bb00) [![ci](https://img.shields.io/github/actions/workflow/status/NicholasXydis/Stage/ci.yml?branch=main&label=ci&logo=githubactions&logoColor=white)](https://github.com/NicholasXydis/Stage/actions/workflows/ci.yml)
+![tests](https://img.shields.io/static/v1?label=tests&message=6%2C387&color=44bb00) ![coverage](https://img.shields.io/static/v1?label=coverage&message=94%25&color=44bb00) [![ci](https://img.shields.io/github/actions/workflow/status/NicholasXydis/Stage/ci.yml?branch=main&label=ci&logo=githubactions&logoColor=white)](https://github.com/NicholasXydis/Stage/actions/workflows/ci.yml)
 
 <br>
 
@@ -414,3 +414,84 @@ MIT. See [LICENSE](LICENSE).
 <br>
 <sub>Built for students who would rather be studying than refreshing career pages.</sub>
 </div>
+
+### Employer industries
+
+Filter employers independently of the posting's role or level:
+
+```sh
+stage list --industry gaming
+stage list --industry tech
+stage list --industry finance
+stage search python --industry fashion --industry fintech --level all
+stage export --industry gaming --format csv --all
+stage prefs --industry gaming,fintech
+stage list --mine
+stage list --industry unknown
+```
+
+Repeated industries (or comma-separated values) match **any** selected industry;
+other filters still intersect, before counts and pagination. An explicit industry
+selection overrides saved industries under `--mine`. `stage prefs --industry ""`
+clears this preference. TUI filters offer a single industry selection; MCP search,
+export and preferences accept an `industries` list.
+
+Labels classify the **employer**, not every team or job it offers. The curated
+catalogue is deliberately incomplete: `unknown` means the stored employer name
+has no exact alias in the catalogue, not that its actual industry is unknowable.
+No industry filter preserves existing results. Stage never infers industry from
+a title, source job category, substring, or similar-looking company name.
+Fintech covers financial technology and payment platforms (including Shopify's
+commerce/payment platform). Finance includes traditional banks and financial
+services. Tech covers explicitly curated technology companies; having software
+roles does not make an employer a tech company. Some employers have multiple
+labels, such as Stripe in fintech, tech and finance. Traditional banks are not
+automatically classified as fintech.
+
+To extend the taxonomy, edit `src/stage/data/industries.json`. Each employer has
+explicit `aliases` and one or more `industries` from `Industry` in
+`src/stage/domain/industry.py`. Aliases use the same `fold_company` normalization
+as stored postings; duplicate normalized aliases are rejected, even within one
+entry. Add divisions only when their exact name unambiguously identifies the
+employer. Do not add ambiguous abbreviations or infer a subsidiary's classification
+from a parent name. New industry labels also need CLI/MCP choices and tests.
+Catalogue changes apply to already stored rows without a sync or database migration.
+
+### Broader occupations and levels
+
+Broader occupation search is available with `--level mid`, `--level senior`,
+`--level unknown`, or `--level all`; the default remains internships only.
+Roles include `project-management`, `program-management`, `production`, `finance`,
+`investment-research`, `investment-banking`, and `risk`, alongside existing roles.
+Occupation phrases and negative examples live in `data/lexicon/roles.yaml` inside
+Stage's package. New occupation phrases use titles, not employer industry.
+A neutral title such as Project Manager stays at unknown level. Explicit senior
+and intermediate/mid-level markers set seniority; numeric grades remain unknown
+when their meaning is ambiguous. Mixed occupation titles are stored and searchable
+under each matched role after screening or rescreening (all new occupation matches plus the existing primary
+specialty). Legacy-only mixed specialties still use their existing primary role.
+
+The new occupations and quant roles retain master/PhD requirements as metadata.
+Other roles keep their existing degree eligibility rules. Source acquisition is
+unchanged: broad ATS boards can provide these jobs, while curated internship feeds
+and Workday's early-career queries still constrain what is fetched.
+
+Upgrades rescreen stored postings in bounded pages. Quarantined postings lack their
+original descriptions, so they are not released by rescreen alone. Fresh listings
+without descriptions can release quant and the supported management and finance
+occupations, where graduate degrees are eligible. Rescreen can sharpen rejection
+reasons but does not establish whether a posting remains open, so it never releases
+quarantined postings without a fresh source listing. Each quarantined copy needs
+its own fresh listing; accepting a canonical posting does not reopen stale copies.
+A descriptionless copy can return when its matching open Workday or SmartRecruiters
+canonical has a successful detail fetch from its latest listing read, with
+eligible degree evidence at least as recent as the copy's last observation. Its
+degree and work authorization remain unknown until evidence for the copy is
+available. Other sources lack per-description fetch provenance, so their
+quarantined copies need their own fresh descriptions to return.
+
+Workday and SmartRecruiters queue eligible quarantined postings for job pages,
+including location rejections. The bounded queue advances across syncs even when
+selected postings are absent from the board read. Detail fetches still require the
+posting to appear in a listing and remain subject to the existing retry limits.
+The quarantine count is separate from stored postings examined during rescreen.

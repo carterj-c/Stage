@@ -36,7 +36,8 @@ class Job:
     term: str = UNKNOWN_TERM
     role: RoleCategory = RoleCategory.UNKNOWN
     level: JobLevel = JobLevel.UNKNOWN
-    work_auth_flag: bool = False
+    roles: tuple[RoleCategory, ...] = ()
+    work_auth_flag: bool | None = False
     degree_requirement: DegreeRequirement = DegreeRequirement.UNKNOWN
     compensation: str | None = None
     source_posted_at: datetime | None = None

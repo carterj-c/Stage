@@ -132,6 +132,16 @@ class AsyncRepository:
     async def cached_url_count(self) -> int:
         return await self._writer.run(lambda repository: repository.cached_url_count())
 
+    async def list_rescreen_jobs(self, after_id: str, limit: int) -> list[Job]:
+        return await self._writer.run(
+            lambda repository: repository.list_rescreen_jobs(after_id, limit)
+        )
+
+    async def list_rescreen_quarantine(self, after_id: str, limit: int) -> list[QuarantinedJob]:
+        return await self._writer.run(
+            lambda repository: repository.list_rescreen_quarantine(after_id, limit)
+        )
+
     async def list_quarantined(self, filters: QuarantineFilters) -> list[QuarantinedJob]:
         return await self._writer.run(lambda repository: repository.list_quarantined(filters))
 

@@ -79,6 +79,7 @@ def normalize_batch(jobs: Sequence[Job]) -> Screened:
             remote_scope=location.remote_scope,
             term=term.term,
             role=role.role,
+            roles=role.roles,
             language=language.language,
             degree_requirement=eligibility.degree_requirement,
             work_auth_flag=eligibility.work_auth_flag,

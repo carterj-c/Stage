@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from stage.domain import Language
-from stage.lexicon import fold, internship_lexicon
+from stage.lexicon import fold, internship_lexicon, occupation_lexicon
 from stage.normalize import detect_language
 
 
@@ -56,7 +56,17 @@ def screen_internship(
 
     structured = _structured_hit(employment_type, lexicon.structured_internship)
     if structured and not matched:
-        senior = _blocked_positions(folded_title, lexicon.structured_only_blocked)
+        padded = f" {folded_title} "
+        manager_occupation = any(
+            f" {phrase} " in padded
+            for phrases in occupation_lexicon().values()
+            for phrase in phrases
+            if "manager" in phrase.split()
+        )
+        blocked_levels = lexicon.structured_only_blocked
+        if manager_occupation:
+            blocked_levels = blocked_levels - {"manager"}
+        senior = _blocked_positions(folded_title, blocked_levels)
         if senior:
             return InternshipVerdict(is_internship=False, disqualified_by=senior)
 

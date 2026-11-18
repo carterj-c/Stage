@@ -17,7 +17,7 @@ from stage.domain import (
 from stage.services.screening import normalize_batch
 from stage.storage import SourceBatch, open_repository
 
-FULL_TIME = "Senior Software Engineer"
+OUT_OF_SCOPE = "Registered Nurse Intern"
 
 
 def _job(
@@ -57,8 +57,8 @@ def test_international_locations_are_quarantined(run_time: datetime) -> None:
 
 
 def test_a_rejection_explains_the_evidence(run_time: datetime) -> None:
-    _, rejected = normalize_batch([_job("1", "Remote", run_time, FULL_TIME)])
-    assert rejected[0].reason is RejectionReason.NOT_EARLY_CAREER
+    _, rejected = normalize_batch([_job("1", "Remote", run_time, OUT_OF_SCOPE)])
+    assert rejected[0].reason is RejectionReason.NOT_A_CS_ROLE
     assert rejected[0].matched_phrase, "a rejection must record why"
     assert rejected[0].location_raw == "Remote"
 
@@ -123,7 +123,7 @@ async def test_quarantined_postings_leave_the_jobs_table(db_path: Path, run_time
         kept, rejected = normalize_batch(
             [
                 _job("keep", "Toronto, ON, Canada", run_time),
-                _job("reject", "Remote", run_time, FULL_TIME),
+                _job("reject", "Remote", run_time, OUT_OF_SCOPE),
             ]
         )
         result = await repository.apply_source_batch(
@@ -143,14 +143,14 @@ async def test_quarantined_postings_leave_the_jobs_table(db_path: Path, run_time
 
         entries = await repository.list_quarantined(QuarantineFilters())
         assert [entry.id for entry in entries] == ["reject"]
-        assert await repository.quarantine_reason_counts() == {"not-early-career": 1}
+        assert await repository.quarantine_reason_counts() == {"not-a-cs-role": 1}
 
 
 async def test_a_posting_already_stored_is_moved_when_a_rule_starts_rejecting_it(
     db_path: Path, run_time: datetime
 ) -> None:
     async with open_repository(db_path) as repository:
-        stored = _job("row", "Remote", run_time, FULL_TIME)
+        stored = _job("row", "Remote", run_time, OUT_OF_SCOPE)
         await repository.apply_source_batch(
             SourceBatch(source="greenhouse", run_started_at=run_time, jobs=(stored,))
         )
@@ -175,12 +175,14 @@ async def test_a_released_posting_keeps_its_original_first_seen(
 ) -> None:
     later = run_time + timedelta(days=9)
     async with open_repository(db_path) as repository:
-        _, rejected = normalize_batch([_job("row", "Remote", run_time, FULL_TIME)])
+        _, rejected = normalize_batch([_job("row", "Remote", run_time, OUT_OF_SCOPE)])
         await repository.apply_source_batch(
             SourceBatch(source="greenhouse", run_started_at=run_time, quarantined=rejected)
         )
 
-        released = _job("row", "Montreal, QC, Canada", later)
+        released = replace(
+            _job("row", "Montreal, QC, Canada", later), description="Build software."
+        )
         kept, still_rejected = normalize_batch([released])
         assert still_rejected == ()
         await repository.apply_source_batch(
@@ -198,8 +200,8 @@ async def test_quarantine_filters(db_path: Path, run_time: datetime) -> None:
     async with open_repository(db_path) as repository:
         _, rejected = normalize_batch(
             [
-                _job("a", "Remote", run_time, FULL_TIME),
-                _job("b", "Distributed", run_time, FULL_TIME),
+                _job("a", "Remote", run_time, OUT_OF_SCOPE),
+                _job("b", "Distributed", run_time, OUT_OF_SCOPE),
             ]
         )
         await repository.apply_source_batch(
@@ -209,7 +211,7 @@ async def test_quarantine_filters(db_path: Path, run_time: datetime) -> None:
         assert await repository.count_quarantined(QuarantineFilters(source="lever")) == 0
         assert (
             await repository.count_quarantined(
-                QuarantineFilters(reason=RejectionReason.NOT_EARLY_CAREER)
+                QuarantineFilters(reason=RejectionReason.NOT_A_CS_ROLE)
             )
             == 2
         )
@@ -298,7 +300,7 @@ async def test_a_quarantine_page_starts_at_its_offset_and_counts_follow_the_filt
     db_path: Path, run_time: datetime
 ) -> None:
     abroad = [_job(f"abroad-{n}", "Berlin, Germany", run_time) for n in range(3)]
-    full_time = replace(_job("full", "Toronto, ON", run_time, FULL_TIME), company="Beta")
+    full_time = replace(_job("full", "Toronto, ON", run_time, OUT_OF_SCOPE), company="Beta")
     async with open_repository(db_path) as repository:
         _, rejected = normalize_batch([*abroad, full_time])
         await repository.apply_source_batch(

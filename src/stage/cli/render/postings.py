@@ -177,11 +177,15 @@ def render_posting(
     console.print(field("location", where))
     state("term", job.term)
     state("role", job.role.value)
+    if len(job.roles) > 1:
+        console.print(field("roles", ", ".join(role.value for role in job.roles)))
     state("level", job.level.value)
     state("language", job.language.value)
-    state("degree", job.degree_requirement.value)
+    console.print(field("degree", job.degree_requirement.value))
     if job.work_auth_flag:
         console.print(field("work auth", "restricted: the posting states an eligibility limit"))
+    elif job.work_auth_flag is None:
+        console.print(field("work auth", "unknown: posting description unavailable"))
     if job.compensation:
         console.print(field("compensation", _sanitize(job.compensation)))
     console.print(field("first seen", f"{job.first_seen.astimezone():%Y-%m-%d} ({age})"))
@@ -272,6 +276,7 @@ def render_preferences(
     console.print(plain("Saved your preferences." if saved else "Your preferences", "bold"))
     console.print(field("Locations", listed([v.value for v in preferences.locations])))
     console.print(field("Roles", listed([v.value for v in preferences.roles])))
+    console.print(field("Industries", listed([v.value for v in preferences.industries])))
     levels = [v.value for v in preferences.levels]
     console.print(field("Levels", listed(levels) if levels else "internship (the default)"))
     console.print(field("Terms", listed(list(preferences.terms))))

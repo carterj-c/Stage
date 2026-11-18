@@ -415,7 +415,7 @@ def test_structured_evidence_reaches_the_composed_pipeline() -> None:
     assert generic, "a trusted ATS employment type keeps an otherwise unmarked title"
 
     permanent = _screened("Backend Engineer", "Full-time")
-    assert not permanent, "full-time alone is never internship evidence"
+    assert permanent, "a markerless full-time title can be kept at unknown level"
 
     assert replace(SourceSignals(), employment_type="Internship").employment_type
 
