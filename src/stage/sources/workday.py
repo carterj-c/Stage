@@ -813,35 +813,36 @@ async def _attach_descriptions(
         company.workday_tenant or "", company.workday_site or "", company.workday_dc or ""
     )
     outcomes: list[DetailFetch] = []
-    merged: list[tuple[WorkdayPosting, Job]] = []
+    fetched: dict[str, tuple[str, str] | None] = {}
     for posting, job in paired:
-        if job.id not in wanted or not posting.externalPath:
-            merged.append((posting, job))
+        if job.id not in wanted or job.id in fetched or not posting.externalPath:
             continue
-        path = posting.externalPath
-        url = f"https://{host}/wday/cxs/{company.workday_tenant}/{company.workday_site}{path}"
+        fetched[job.id] = None
+        url = f"https://{host}/wday/cxs/{company.workday_tenant}/{company.workday_site}{posting.externalPath}"
         try:
             response = await client.get_json(url, revalidate=True)
         except RequestRefusedError:
-            merged.append((posting, job))
             continue
         except (HttpError, httpx.HTTPError):
             outcomes.append(DetailFetch(id=job.id, resolved=False, failed=True))
-            merged.append((posting, job))
             continue
         body = _description_from(response.payload)
-        places = _locations_from(response.payload) if counts_locations(job.location_raw) else ""
+        fetched[job.id] = (body, _locations_from(response.payload))
         outcomes.append(DetailFetch(id=job.id, resolved=bool(body)))
-        merged.append(
-            (
-                posting,
-                replace(
-                    job,
-                    description=body or job.description,
-                    location_raw=places or job.location_raw,
-                ),
+
+    merged: list[tuple[WorkdayPosting, Job]] = []
+    for posting, job in paired:
+        result = fetched.get(job.id)
+        if result is not None:
+            body, places = result
+            job = replace(
+                job,
+                description=body or job.description,
+                location_raw=(places or job.location_raw)
+                if counts_locations(job.location_raw)
+                else job.location_raw,
             )
-        )
+        merged.append((posting, job))
     return merged, outcomes
 
 
