@@ -21,7 +21,7 @@ _NOT_A_DEGREE = re.compile(
 @dataclass(frozen=True, slots=True)
 class EligibilityVerdict:
     degree_requirement: DegreeRequirement
-    work_auth_flag: bool
+    work_auth_flag: bool | None
     matched_phrase: str = ""
     work_auth_phrase: str = ""
 
@@ -103,7 +103,7 @@ def resolve_eligibility(job: Job) -> EligibilityVerdict:
         )
     return EligibilityVerdict(
         degree_requirement=degree,
-        work_auth_flag=bool(excluded),
+        work_auth_flag=True if excluded else False if job.description.strip() else None,
         matched_phrase=matched or excluded,
         work_auth_phrase=excluded,
     )

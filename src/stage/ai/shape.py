@@ -151,6 +151,8 @@ def posting_detail(detail: PostingDetail, entry: TrackedPosting | None) -> dict[
         "last_seen": day(job.last_seen),
         "source": job.source,
         "description": description[:DESCRIPTION_LIMIT],
+        "work_auth_restricted": job.work_auth_flag,
+        "degree_requirement": job.degree_requirement.value,
     }
     if len(description) > DESCRIPTION_LIMIT:
         found["description_truncated"] = True

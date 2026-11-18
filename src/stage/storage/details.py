@@ -36,8 +36,10 @@ REREAD_ATTEMPTS = 2
 _QUEUED = (
     "FROM jobs j LEFT JOIN detail_fetches d ON d.id = j.id "
     "WHERE j.source = ? AND j.status = ? AND ("
-    "(j.description = '' AND (j.term = ? OR j.role = ?) AND (d.id IS NULL "
-    "OR (d.failed = 1 AND d.attempts < ?) OR (d.resolved = 1 AND d.attempts < ?))) "
+    "(j.description = '' AND (j.term = ? OR j.role = ? OR j.work_auth_known = 0) "
+    "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
+    "OR (d.resolved = 1 AND d.attempts < ?) "
+    "OR d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed'))) "
     "OR (j.location_raw GLOB ? AND (d.id IS NULL OR d.attempts < ?)))"
 )
 
@@ -46,7 +48,7 @@ _AWAITING = (
     "FROM quarantine q LEFT JOIN detail_fetches d ON d.id = q.id "
     "WHERE q.source = ? AND (q.matched_phrase GLOB ? OR "
     "(q.source IN ('workday', 'smartrecruiters') "
-    "AND q.reason IN (?, ?, ?, ?, ?))) "
+    "AND q.reason IN (?, ?, ?, ?, ?, ?))) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
     "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)))"
 )
@@ -73,6 +75,7 @@ def _queued(source: str) -> tuple[object, ...]:
         RejectionReason.NOT_AN_INTERNSHIP.value,
         RejectionReason.NOT_A_CS_ROLE.value,
         RejectionReason.UNKNOWN_CS_ROLE.value,
+        RejectionReason.OUT_OF_SCOPE_LOCATION.value,
         MAX_DETAIL_ATTEMPTS,
         "rules:changed",
     )
@@ -80,10 +83,16 @@ def _queued(source: str) -> tuple[object, ...]:
 
 class DetailFetches(Store):
     def detail_queue(self, source: str, limit: int) -> list[str]:
-        rows = self._conn.execute(
-            f"SELECT id FROM ({_QUEUE}) ORDER BY rank, first_seen DESC LIMIT ?",
-            (*_queued(source), limit),
-        )
+        cursor = self._conn.execute(
+            "SELECT cursor FROM detail_queue_cursors WHERE source = ?", (source,)
+        ).fetchone()
+        if cursor is None:
+            order = "rank, first_seen DESC, id"
+            params: tuple[object, ...] = (*_queued(source), limit)
+        else:
+            order = "CASE WHEN id > ? THEN 0 ELSE 1 END, id"
+            params = (*_queued(source), str(cursor[0]), limit)
+        rows = self._conn.execute(f"SELECT id FROM ({_QUEUE}) ORDER BY {order} LIMIT ?", params)
         return [str(row["id"]) for row in rows]
 
     def detail_queue_size(self, source: str) -> int:

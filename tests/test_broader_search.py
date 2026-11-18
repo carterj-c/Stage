@@ -155,8 +155,11 @@ async def test_degree_quarantine_waits_for_complete_source_refresh(tmp_path: Pat
         await repo.apply_source_batch(
             SourceBatch(source="greenhouse", run_started_at=NOW, jobs=incomplete)
         )
-        assert await repo.get_job(eligible.id) is None
-        assert len(await repo.list_quarantined(QuarantineFilters(limit=None))) == 2
+        incomplete_restored = await repo.get_job(eligible.id)
+        assert incomplete_restored is not None
+        assert incomplete_restored.degree_requirement is DegreeRequirement.UNKNOWN
+        assert incomplete_restored.work_auth_flag is None
+        assert len(await repo.list_quarantined(QuarantineFilters(limit=None))) == 1
         accepted, rejected = normalize_batch([unsafe, eligible])
         assert [entry.id for entry in rejected] == [unsafe.id]
         assert [job.id for job in accepted] == [eligible.id]

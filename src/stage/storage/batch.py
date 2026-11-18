@@ -13,13 +13,17 @@ from stage.domain import (
     REPOST,
     UNKNOWN_TERM,
     Job,
+    JobLevel,
     JobStatus,
     LocationBucket,
     QuarantinedJob,
+    RejectionReason,
+    RoleCategory,
     board_of,
 )
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
 from stage.domain.text import is_workday_opening
+from stage.lexicon import occupation_lexicon
 from stage.storage.copies import (
     copies_of_rejected,
     duplicate_candidates,
@@ -440,12 +444,35 @@ class BatchWriter(Store):
         stamp = to_text(started)
         with self._transaction() as conn:
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
-            without_description = [job for job in batch.jobs if not job.description.strip()]
-            held_without_body = {
-                str(row["id"])
+            if batch.detail_queue_cursor is not None:
+                conn.execute(
+                    "INSERT INTO detail_queue_cursors (source, cursor) VALUES (?, ?) "
+                    "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor",
+                    (batch.source, batch.detail_queue_cursor),
+                )
+            without_description = [
+                job
+                for job in batch.jobs
+                if not job.description.strip()
+                and not any(
+                    role is RoleCategory.QUANT or role.value in occupation_lexicon()
+                    for role in (job.role, *job.roles)
+                )
+            ]
+            old_reasons = {
+                str(row["id"]): str(row["reason"])
                 for row in conn.execute(
-                    f"SELECT id FROM quarantine WHERE id IN {EACH}",
+                    f"SELECT id, reason FROM quarantine WHERE id IN {EACH}",
                     (listed(j.id for j in without_description),),
+                )
+            }
+            held_without_body = {
+                job.id
+                for job in without_description
+                if job.id in old_reasons
+                and (
+                    job.level in (JobLevel.INTERNSHIP, JobLevel.UNKNOWN)
+                    or old_reasons[job.id] == RejectionReason.OUT_OF_SCOPE_DEGREE.value
                 )
             }
             conn.executemany(
@@ -466,6 +493,14 @@ class BatchWriter(Store):
                 if not seen.get(job.id, _UNSEEN).expired(cutoff)
                 and job.id not in retired
                 and job.id not in held_without_body
+            )
+            jobs = tuple(
+                replace(job, work_auth_flag=None)
+                if seen.get(job.id, _UNSEEN).rejected is not None
+                and not job.description.strip()
+                and job.work_auth_flag is False
+                else job
+                for job in jobs
             )
             held = _held_closed(conn, batch, jobs)
             jobs = tuple(

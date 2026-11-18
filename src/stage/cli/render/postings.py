@@ -184,6 +184,8 @@ def render_posting(
     state("degree", job.degree_requirement.value)
     if job.work_auth_flag:
         console.print(field("work auth", "restricted: the posting states an eligibility limit"))
+    elif job.work_auth_flag is None:
+        console.print(field("work auth", "unknown: posting description unavailable"))
     if job.compensation:
         console.print(field("compensation", _sanitize(job.compensation)))
     console.print(field("first seen", f"{job.first_seen.astimezone():%Y-%m-%d} ({age})"))

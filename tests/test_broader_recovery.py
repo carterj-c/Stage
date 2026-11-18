@@ -7,6 +7,7 @@ import pytest
 from stage.classify.level import screen_level
 from stage.classify.scope import Rejection, to_quarantined
 from stage.domain import (
+    DegreeRequirement,
     Job,
     JobFilters,
     JobLevel,
@@ -171,7 +172,7 @@ def test_structured_intern_does_not_override_disqualifiers(title: str) -> None:
 
 
 @pytest.mark.parametrize("source", ["simplify-new-grad", "speedyapply-new-grad", "workday"])
-async def test_descriptionless_feed_refresh_stays_quarantined(
+async def test_descriptionless_quant_feed_refresh_preserves_unknown_evidence(
     tmp_path: Path,
     source: str,
 ) -> None:
@@ -186,8 +187,11 @@ async def test_descriptionless_feed_refresh_stays_quarantined(
         kept, rejected = normalize_batch([job])
         assert len(kept) == 1 and not rejected
         await repo.apply_source_batch(SourceBatch(source=source, run_started_at=NOW, jobs=kept))
-        assert await repo.get_job(job.id) is None
-        assert len(await repo.list_quarantined(QuarantineFilters(limit=None))) == 1
+        restored = await repo.get_job(job.id)
+        assert restored is not None
+        assert restored.degree_requirement is DegreeRequirement.UNKNOWN
+        assert restored.work_auth_flag is None
+        assert await repo.list_quarantined(QuarantineFilters(limit=None)) == []
 
 
 async def test_rescreen_pages_beyond_100000_without_hiding_held_rows(

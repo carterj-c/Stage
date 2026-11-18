@@ -477,16 +477,16 @@ unchanged: broad ATS boards can provide these jobs, while curated internship fee
 and Workday's early-career queries still constrain what is fetched.
 
 Upgrades rescreen stored postings in bounded pages. Quarantined postings lack their
-original descriptions, so they stay quarantined until a source refresh provides a
-description. Workday and SmartRecruiters queue eligible quarantined postings for a
-fresh job page, subject to the existing retry limit and availability of the listing.
-Curated and new-grad feeds that do not provide descriptions cannot automatically
-release these rows, including quant and non-intern postings: work authorization is
-stored as a boolean, so Stage cannot faithfully represent an unknown restriction.
-Those rows remain quarantined until a response with a description becomes available. The reported
-quarantine count is separate from stored postings examined during rescreen.
-A paged-source detail is fetched only when that posting appears in a board read.
-A capped queue can repeatedly select unavailable listings ahead of others; Stage
-does not yet guarantee progress for every waiting row. The rules-version stamp
-records the stored-posting rescreen, while the separate quarantine count reports
-recovery that remains outstanding.
+original descriptions, so they are not released by rescreen alone. Fresh listings
+without descriptions can release quant and the supported management and finance
+occupations, where graduate degrees are eligible. Fresh listings with explicit
+non-intern levels can also recover legacy roles previously rejected for another
+reason. Their degree and work authorization are reported as unknown until evidence
+is available. Legacy internships, unknown-level roles, and legacy roles previously
+rejected for degree requirements remain quarantined until a description is available.
+
+Workday and SmartRecruiters queue eligible quarantined postings for job pages,
+including location rejections. The bounded queue advances across syncs even when
+selected postings are absent from the board read. Detail fetches still require the
+posting to appear in a listing and remain subject to the existing retry limits.
+The quarantine count is separate from stored postings examined during rescreen.

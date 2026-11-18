@@ -67,6 +67,7 @@ class SourceBatch:
     quarantined: tuple[QuarantinedJob, ...] = field(default_factory=tuple)
     resolve_duplicates: Resolver | None = None
 
+    detail_queue_cursor: str | None = None
     closes_whole_source: bool = False
     list_sources: frozenset[str] = frozenset()
 
