@@ -76,6 +76,7 @@ class MusePage(BaseModel):
 @register_feed
 class TheMuseFeed:
     name: ClassVar[str] = "themuse"
+    description_is_full: ClassVar[bool] = True
     rate_profile: ClassVar[str] = "searches"
     hosts: ClassVar[frozenset[str]] = frozenset({HOST})
     bucket_key: ClassVar[str] = "themuse"

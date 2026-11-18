@@ -72,7 +72,7 @@ class QuarantineStore(Store):
         with self._transaction() as conn:
             return conn.executemany(
                 "UPDATE quarantine SET reason = ?, matched_phrase = ? "
-                "WHERE id = ? AND (reason <> ? OR matched_phrase <> ?)",
+                "WHERE id = ? AND rejection_evidence = '' AND (reason <> ? OR matched_phrase <> ?)",
                 [
                     (
                         entry.reason.value,

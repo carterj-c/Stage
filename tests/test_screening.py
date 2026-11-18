@@ -536,3 +536,25 @@ if sys.platform != "win32":
 
         assert signal.SIGINT in held
         assert signal.SIGINT not in after
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        (True, True, True),
+        (True, False, True),
+        (False, True, True),
+        (True, None, True),
+        (None, True, True),
+        (False, False, False),
+        (None, False, None),
+        (False, None, None),
+        (None, None, None),
+    ],
+)
+def test_combining_work_authorization_preserves_unknown(
+    left: bool | None, right: bool | None, expected: bool | None
+) -> None:
+    from stage.services.screening import combine_work_auth
+
+    assert combine_work_auth(left, right) is expected

@@ -268,7 +268,7 @@ class Upkeep(Store):
             followed = tuple(sorted(heirs_of(conn, set(ids), successors).items()))
             forgotten = conn.execute(
                 "DELETE FROM quarantine WHERE last_seen < ? "
-                f"AND NOT {verified_feed_hold('quarantine')}",
+                f"AND rejection_evidence = '' AND NOT {verified_feed_hold('quarantine')}",
                 (cutoff, FEED_REJECTION_PREFIX, FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX),
             ).rowcount
             _forget_checks(conn, ids)
@@ -305,7 +305,7 @@ class Upkeep(Store):
         stale = count(
             self._conn,
             "SELECT COUNT(*) FROM quarantine WHERE last_seen < ? "
-            f"AND NOT {verified_feed_hold('quarantine')}",
+            f"AND rejection_evidence = '' AND NOT {verified_feed_hold('quarantine')}",
             (
                 _rejections_cutoff(now),
                 FEED_REJECTION_PREFIX,

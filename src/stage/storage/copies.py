@@ -223,7 +223,7 @@ def restore_copies(conn: sqlite3.Connection, accepted: Mapping[str, JobLevel]) -
         return
     rows = conn.execute(
         "SELECT * FROM quarantine q WHERE reason = ? AND matched_phrase GLOB ? "
-        f"AND NOT {verified_feed_hold('q')}",
+        f"AND q.rejection_evidence = '' AND NOT {verified_feed_hold('q')}",
         (_DEGREE, _COPY_GLOB, FEED_REJECTION_PREFIX, FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX),
     )
     back = [

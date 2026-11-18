@@ -9,7 +9,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import cast, overload
 
 from stage.classify import (
     classify_role,
@@ -101,6 +101,22 @@ def _normalize_one(job: Job) -> tuple[Job, Rejection | None]:
     return normalized, rejection
 
 
+@overload
+def combine_work_auth(left: bool, right: bool) -> bool: ...
+
+
+@overload
+def combine_work_auth(left: bool | None, right: bool | None) -> bool | None: ...
+
+
+def combine_work_auth(left: bool | None, right: bool | None) -> bool | None:
+    if left is True or right is True:
+        return True
+    if left is False and right is False:
+        return False
+    return None
+
+
 def combine_summary_evidence(job: Job, rejection: Rejection | None) -> tuple[Job, Rejection | None]:
     if not job.feed_summary:
         return job, rejection
@@ -136,7 +152,7 @@ def combine_summary_evidence(job: Job, rejection: Rejection | None) -> tuple[Job
         job,
         role=role,
         degree_requirement=degree,
-        work_auth_flag=job.work_auth_flag or summary.work_auth_flag,
+        work_auth_flag=combine_work_auth(job.work_auth_flag, summary.work_auth_flag),
     ), restrictive or rejection or summary_rejection
 
 

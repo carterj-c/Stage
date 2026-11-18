@@ -450,7 +450,8 @@ def _hold_feed_rejections(conn: sqlite3.Connection, batch: SourceBatch) -> Sourc
         str(row["id"])
         for row in conn.execute(
             f"SELECT q.id FROM quarantine q WHERE q.id IN {EACH} AND q.source = ? "
-            f"AND ({verified_feed_hold('q')} OR (? = 0 AND EXISTS "
+            f"AND ({verified_feed_hold('q')} OR (? = 0 AND q.rejection_evidence <> '') "
+            "OR (? = 0 AND EXISTS "
             "(SELECT 1 FROM detail_fetches p WHERE p.id = ? || q.id)))",
             (
                 listed(incoming),
@@ -458,6 +459,7 @@ def _hold_feed_rejections(conn: sqlite3.Connection, batch: SourceBatch) -> Sourc
                 FEED_REJECTION_PREFIX,
                 FEED_DECISION_PREFIX,
                 FEED_DETAIL_PREFIX,
+                int(batch.feed_source),
                 int(batch.feed_source),
                 FEED_PENDING_PREFIX,
             ),
@@ -488,7 +490,7 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
             "JOIN source_visits v ON v.source = q.source AND v.board = q.source "
             "WHERE q.id = ? AND q.source = 'hanzili' AND p.resolved = 1 AND p.failed = 0 "
             "AND v.last_success_at IS NOT NULL AND v.consecutive_failures = 0 "
-            f"AND NOT {verified_feed_hold('q')}",
+            f"AND q.rejection_evidence = '' AND NOT {verified_feed_hold('q')}",
             (
                 FEED_PENDING_PREFIX,
                 expected_pending.id,
@@ -526,6 +528,22 @@ def _protect_screened_feed_rows(
     rejected_entries = {entry.id: entry for entry in batch.quarantined}
     accepted = {entry.id: entry for entry in batch.jobs}
     identities = [entry.id for entry in batch.jobs] + [entry.id for entry in batch.quarantined]
+    if batch.feed_quarantine_urls:
+        rows = conn.execute(
+            f"SELECT * FROM quarantine WHERE source = ? AND apply_url_raw IN {EACH} "
+            "AND rejection_evidence <> ''",
+            (batch.source, listed(batch.feed_quarantine_urls)),
+        )
+        current_url_holds = {entry.id: entry for entry in map(quarantined_from, rows)}
+        expected_url_holds = {
+            entry.id: entry
+            for entry in batch.feed_quarantine_expected
+            if entry.source == batch.source
+            and entry.apply_url_raw in batch.feed_quarantine_urls
+            and entry.rejection_evidence
+        }
+        if current_url_holds != expected_url_holds:
+            blocked.update(identities)
     for ident in identities:
         if batch.feed_expected is not None:
             latest = conn.execute("SELECT * FROM jobs WHERE id = ?", (ident,)).fetchone()
@@ -621,8 +639,9 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
-            batch = _hold_feed_rejections(conn, _guard_hydration(conn, batch))
+            batch = _guard_hydration(conn, batch)
             batch, verified_rejections, conflicts = _protect_screened_feed_rows(conn, batch)
+            batch = _hold_feed_rejections(conn, batch)
             verified = set(verified_rejections)
             if batch.hydration_expected is not None:
                 verified.update(
@@ -636,7 +655,15 @@ class BatchWriter(Store):
             batch = replace(
                 batch,
                 quarantined=tuple(
-                    replace(entry, verified_description=evidence[entry.id])
+                    replace(
+                        entry,
+                        verified_description=evidence[entry.id],
+                        rejection_evidence=(
+                            entry.rejection_evidence or evidence[entry.id]
+                            if entry.source == "hanzili"
+                            else entry.rejection_evidence
+                        ),
+                    )
                     if entry.id in verified and entry.id in evidence
                     else entry
                     for entry in batch.quarantined

@@ -34,6 +34,7 @@ class QuarantinedJob:
     category: str = ""
     feed_summary: str = ""
     verified_description: str = ""
+    rejection_evidence: str = ""
 
 
 @dataclass(frozen=True, slots=True)

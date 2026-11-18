@@ -970,9 +970,19 @@ async def _persist_source_batch(
     repository: AsyncRepository, screener: Screener, batch: SourceBatch, collected: Sequence[Job]
 ) -> tuple[SourceBatchResult, float, float]:
     normalize_clock = time.perf_counter()
+    incoming_full = {entry.id: entry.description for entry in collected}
     ids = [job.id for job in collected]
     feed_snapshot = await repository.feed_jobs(ids) if batch.feed_source and ids else []
-    feed_quarantine = await repository.feed_quarantined(ids) if batch.feed_source and ids else []
+    quarantine_urls = (
+        tuple(entry.apply_url_raw for entry in collected if entry.apply_url_raw)
+        if batch.feed_source and batch.source == "hanzili"
+        else ()
+    )
+    feed_quarantine = (
+        await repository.feed_quarantined(ids, batch.source, quarantine_urls)
+        if batch.feed_source and ids
+        else []
+    )
     pending_ids = (
         await repository.feed_pending_ids(ids) if batch.source == "hanzili" and ids else set()
     )
@@ -1003,8 +1013,94 @@ async def _persist_source_batch(
             )
         screened: Sequence[Job] = tuple(prepared)
     else:
+        previous_rejections = {entry.id: entry for entry in feed_quarantine}
+        if batch.feed_full_source:
+            collected = tuple(
+                replace(
+                    entry,
+                    description=(
+                        entry.description
+                        or (
+                            previous_rejections[entry.id].verified_description
+                            if entry.id in previous_rejections
+                            else ""
+                        )
+                    ),
+                )
+                for entry in collected
+            )
         screened = await _with_stored_details(repository, collected)
     kept, rejected = await screener(screened)
+    if batch.feed_source and (batch.feed_full_source or batch.source == "hanzili"):
+        from stage.classify.scope import Rejection, to_quarantined
+
+        previous = {entry.id: entry for entry in feed_quarantine}
+        previous_by_url = {
+            entry.apply_url_raw: entry
+            for entry in feed_quarantine
+            if entry.rejection_evidence and entry.apply_url_raw
+        }
+        screened_by_id = {entry.id: entry for entry in screened}
+        kept_by_id = {entry.id: entry for entry in kept}
+        rejected_by_id = {entry.id: entry for entry in rejected}
+        for ident, screened_job in screened_by_id.items():
+            previous_rejection = previous.get(ident)
+            if previous_rejection is None and batch.source == "hanzili":
+                previous_rejection = previous_by_url.get(screened_job.apply_url_raw)
+            old_evidence = previous_rejection.rejection_evidence if previous_rejection else ""
+            if (
+                not old_evidence
+                and previous_rejection is not None
+                and batch.source == "hanzili"
+                and previous_rejection.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+                and not previous_rejection.matched_phrase.startswith("copy of ")
+            ):
+                old_evidence = previous_rejection.feed_summary
+            fresh_full = batch.feed_full_source and bool(incoming_full.get(ident))
+            if (
+                old_evidence
+                and not fresh_full
+                and ident in kept_by_id
+                and previous_rejection is not None
+            ):
+                normalized = kept_by_id.pop(ident)
+                rejected_by_id[ident] = to_quarantined(
+                    normalized,
+                    Rejection(previous_rejection.reason, previous_rejection.matched_phrase),
+                )
+            item = rejected_by_id.get(ident)
+            if item is None:
+                continue
+            if old_evidence and not fresh_full and previous_rejection is not None:
+                item = replace(
+                    item,
+                    reason=previous_rejection.reason,
+                    matched_phrase=previous_rejection.matched_phrase,
+                )
+            evidence = old_evidence
+            if (
+                not evidence
+                and batch.source == "hanzili"
+                and item.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+                and not screened_job.description
+                and not item.matched_phrase.startswith("copy of ")
+            ):
+                evidence = item.feed_summary
+            if batch.feed_full_source and screened_job.description:
+                evidence = evidence or screened_job.description
+            rejected_by_id[ident] = replace(
+                item,
+                rejection_evidence=evidence,
+                verified_description=(
+                    screened_job.description
+                    if batch.feed_full_source and screened_job.description
+                    else previous_rejection.verified_description
+                    if previous_rejection is not None
+                    else ""
+                ),
+            )
+        kept = tuple(kept_by_id.values())
+        rejected = tuple(rejected_by_id.values())
     if batch.feed_source and batch.source == "hanzili":
         from stage.classify import screen_is_cs_role
         from stage.services.hydration_targets import target_for_url
@@ -1058,6 +1154,7 @@ async def _persist_source_batch(
             rejection_screened=tuple(screened),
             feed_expected=tuple(feed_snapshot) if batch.feed_source else None,
             feed_quarantine_expected=tuple(feed_quarantine),
+            feed_quarantine_urls=quarantine_urls,
         )
     )
     if counts.successors:
@@ -1525,6 +1622,7 @@ async def _run_feed_source(
             run_started_at=run_started_at,
             feed_source=True,
             feed_summary_source=bool(getattr(feed, "description_is_summary", False)),
+            feed_full_source=bool(getattr(feed, "description_is_full", False)),
             validators=validators,
             rate_state=settled,
             resolve_duplicates=resolve_duplicates,

@@ -116,12 +116,25 @@ QUARANTINE_COLUMNS = (
     "category",
     "feed_summary",
     "verified_description",
+    "rejection_evidence",
 )
 UPSERT_QUARANTINE = upsert(
     "quarantine",
     QUARANTINE_COLUMNS,
     "id",
-    refreshed(*(column for column in QUARANTINE_COLUMNS[1:] if column != "first_seen")),
+    [
+        (
+            "rejection_evidence = CASE WHEN quarantine.rejection_evidence <> '' "
+            "THEN quarantine.rejection_evidence ELSE excluded.rejection_evidence END"
+            if column == "rejection_evidence"
+            else "verified_description = coalesce(nullif(excluded.verified_description, ''), "
+            "quarantine.verified_description)"
+            if column == "verified_description"
+            else f"{column} = excluded.{column}"
+        )
+        for column in QUARANTINE_COLUMNS[1:]
+        if column != "first_seen"
+    ],
 )
 
 _RATE_STATE_COLUMNS = (
@@ -347,6 +360,7 @@ def quarantined_from(row: sqlite3.Row) -> QuarantinedJob:
         category=row["category"],
         feed_summary=row["feed_summary"],
         verified_description=row["verified_description"],
+        rejection_evidence=row["rejection_evidence"],
     )
 
 
@@ -368,6 +382,7 @@ def quarantined_params(entry: QuarantinedJob, first_seen: datetime) -> tuple[Any
         entry.category,
         entry.feed_summary,
         entry.verified_description,
+        entry.rejection_evidence,
     )
 
 

@@ -326,7 +326,69 @@ def test_feed_summary_migration_preserves_existing_jobs_and_quarantine(
             ("feed:acme:2",),
         ).fetchone()
         assert summary is not None and tuple(summary) == ("", "")
-        assert applied_versions(upgraded._conn) == (1, 2, 3)
+        assert applied_versions(upgraded._conn) == (1, 2, 3, 4)
     finally:
         upgraded.close()
     assert len(_snapshots(db_path)) == 1
+
+
+def test_quarantine_evidence_migration_preserves_direct_hanzili_rejections(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.storage import migrations
+
+    shipped = migrations.discover()
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: tuple(m for m in shipped if m.version < 4))
+        old = SqliteRepository.connect(db_path)
+        for ident, matched, summary in (
+            ("hanzili:1", "PhD", "PhD required"),
+            ("hanzili:2", "copy of another rejected for phd", "PhD required"),
+            ("hanzili:3", "PhD", ""),
+        ):
+            old._conn.execute(
+                "INSERT INTO quarantine (id, source, company, title_raw, reason, matched_phrase, "
+                "feed_summary, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ident,
+                    "hanzili",
+                    "Acme",
+                    "Intern",
+                    "out-of-scope-degree",
+                    matched,
+                    summary,
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-02T00:00:00+00:00",
+                ),
+            )
+        old._conn.execute(
+            "INSERT INTO quarantine (id, source, company, title_raw, reason, matched_phrase, "
+            "feed_summary, verified_description, first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "hanzili:4",
+                "hanzili",
+                "Acme",
+                "Intern",
+                "out-of-scope-degree",
+                "PhD",
+                "Hybrid",
+                "Verified PhD required",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old.close()
+    upgraded = SqliteRepository.connect(db_path)
+    try:
+        rows = upgraded._conn.execute(
+            "SELECT id, feed_summary, rejection_evidence FROM quarantine ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("hanzili:1", "PhD required", "PhD required"),
+            ("hanzili:2", "PhD required", ""),
+            ("hanzili:3", "", ""),
+            ("hanzili:4", "Hybrid", "Verified PhD required"),
+        ]
+    finally:
+        upgraded.close()

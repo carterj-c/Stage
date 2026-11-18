@@ -110,7 +110,7 @@ class DetailFetches(Store):
             "AND p.resolved = 1 AND p.failed = 0 "
             "AND v.last_success_at IS NOT NULL AND v.consecutive_failures = 0 "
             "AND (d.id IS NULL OR (d.resolved = 0 AND d.attempts < ? AND d.fetched_at <= ?)) "
-            f"AND NOT {verified_feed_hold('q')})) "
+            f"AND q.rejection_evidence = '' AND NOT {verified_feed_hold('q')})) "
             "ORDER BY position, kind LIMIT ? OFFSET ?",
             (
                 FEED_DETAIL_PREFIX,
@@ -150,8 +150,14 @@ class DetailFetches(Store):
     def detail_queue_size(self, source: str) -> int:
         return count(self._conn, f"SELECT COUNT(*) FROM ({_QUEUE})", _queued(source))
 
-    def feed_quarantined(self, ids: Collection[str]) -> list[QuarantinedJob]:
-        rows = self._conn.execute(f"SELECT * FROM quarantine WHERE id IN {EACH}", (listed(ids),))
+    def feed_quarantined(
+        self, ids: Collection[str], source: str = "", urls: Collection[str] = ()
+    ) -> list[QuarantinedJob]:
+        rows = self._conn.execute(
+            f"SELECT * FROM quarantine WHERE id IN {EACH} OR "
+            f"(source = ? AND apply_url_raw IN {EACH} AND rejection_evidence <> '')",
+            (listed(ids), source, listed(urls)),
+        )
         return [quarantined_from(row) for row in rows]
 
     def feed_pending_ids(self, ids: Collection[str]) -> set[str]:
