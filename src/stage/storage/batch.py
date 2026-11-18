@@ -20,7 +20,7 @@ from stage.domain import (
 )
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
 from stage.domain.text import is_workday_opening
-from stage.domain.visits import FEED_DETAIL_PREFIX
+from stage.domain.visits import FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, FEED_REJECTION_PREFIX
 from stage.storage.copies import (
     copies_of_rejected,
     duplicate_candidates,
@@ -57,6 +57,7 @@ from stage.storage.sql import (
     listed,
     marks,
     to_text,
+    verified_feed_hold,
 )
 from stage.storage.upkeep import (
     heirs_of,
@@ -372,6 +373,28 @@ def _record_reads(
             for entry in batch.detail_fetches
         ],
     )
+    if batch.hydration_expected is not None:
+        verified = {
+            entry.id.removeprefix(FEED_DETAIL_PREFIX)
+            for entry in batch.detail_fetches
+            if entry.id.startswith(FEED_DETAIL_PREFIX) and entry.resolved and not entry.failed
+        }
+        screened = {entry.id for entry in batch.jobs} | {entry.id for entry in batch.quarantined}
+        conn.executemany(
+            UPSERT_DETAIL,
+            [
+                (FEED_DECISION_PREFIX + ident, batch.source, stamp, 1, 1, 0)
+                for ident in verified & screened
+            ],
+        )
+        conn.executemany(
+            UPSERT_DETAIL,
+            [
+                (FEED_REJECTION_PREFIX + entry.id, batch.source, stamp, 1, 1, 0)
+                for entry in batch.quarantined
+                if entry.id in verified
+            ],
+        )
     conn.executemany(
         "DELETE FROM workday_facets WHERE tenant = ? AND site = ?",
         [(facet.tenant, facet.site) for facet in batch.forgotten_facets],
@@ -420,9 +443,15 @@ def _hold_feed_rejections(conn: sqlite3.Connection, batch: SourceBatch) -> Sourc
     held = {
         str(row["id"])
         for row in conn.execute(
-            "SELECT q.id FROM quarantine q JOIN detail_fetches d ON d.id = ? || q.id "
-            f"WHERE q.id IN {EACH} AND q.source = ?",
-            (FEED_DETAIL_PREFIX, listed(incoming), batch.source),
+            f"SELECT q.id FROM quarantine q WHERE q.id IN {EACH} AND q.source = ? "
+            f"AND {verified_feed_hold('q')}",
+            (
+                listed(incoming),
+                batch.source,
+                FEED_REJECTION_PREFIX,
+                FEED_DECISION_PREFIX,
+                FEED_DETAIL_PREFIX,
+            ),
         )
     }
     conn.executemany(

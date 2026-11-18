@@ -8,6 +8,17 @@ from functools import lru_cache
 EACH = "(SELECT value FROM json_each(?))"
 
 
+def verified_feed_hold(alias: str) -> str:
+    return (
+        f"(EXISTS (SELECT 1 FROM detail_fetches d WHERE d.id = ? || {alias}.id "
+        "AND d.resolved = 1 AND d.failed = 0) OR "
+        f"({alias}.matched_phrase NOT GLOB 'copy of *' AND NOT EXISTS "
+        f"(SELECT 1 FROM detail_fetches v WHERE v.id = ? || {alias}.id) AND EXISTS "
+        f"(SELECT 1 FROM detail_fetches d WHERE d.id = ? || {alias}.id "
+        "AND d.resolved = 1 AND d.failed = 0)))"
+    )
+
+
 def link_of(alias: str = "") -> str:
     prefix = f"{alias}." if alias else ""
     return f"coalesce(nullif({prefix}apply_url_canonical, ''), {prefix}apply_url_raw)"

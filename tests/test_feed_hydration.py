@@ -18,7 +18,7 @@ from stage.domain import (
     SourceFresh,
     SyncFinished,
 )
-from stage.domain.visits import FEED_DETAIL_PREFIX
+from stage.domain.visits import FEED_DETAIL_PREFIX, FEED_REJECTION_PREFIX
 from stage.http import HostBudget, RatePosture
 from stage.services import feed_hydration
 from stage.services import sync as sync_module
@@ -405,6 +405,7 @@ async def test_concurrent_updates_win_atomic_snapshot_guard(
                 assert stored.apply_url_raw.endswith("/999") and not stored.description
         assert not await repo.list_quarantined(QuarantineFilters())
     assert attempt(db_path) is None
+    assert rejection_marker(db_path) is None
 
 
 @respx.mock
@@ -692,7 +693,7 @@ async def test_duplicate_restoration_does_not_release_a_held_copy(db_path: Path)
                 source="test-feed",
                 run_started_at=NOW,
                 quarantined=(held,),
-                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + held.id, resolved=True),),
+                detail_fetches=(DetailFetch(FEED_REJECTION_PREFIX + held.id, resolved=True),),
             )
         )
         await seed(repo, job())
@@ -769,3 +770,179 @@ async def test_batch_guard_cannot_promote_a_quarantined_row_during_a_race(db_pat
         )
         assert await repo.get_job(job().id) is None
         assert len(await repo.list_quarantined(QuarantineFilters(source="test-feed"))) == 1
+
+
+@pytest.mark.parametrize("marker", ["failed", "unsupported", "successful"])
+async def test_inherited_rejection_with_attempt_marker_reopens_when_canonical_is_eligible(
+    db_path: Path,
+    marker: str,
+) -> None:
+    from stage.domain import DetailFetch, RejectionReason
+
+    copy = QuarantinedJob(
+        id=job(124).id,
+        source="test-feed",
+        company="Acme",
+        title_raw=job(124).title_raw,
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase=f"copy of {job().id} rejected for phd",
+        first_seen=job(124).first_seen,
+        last_seen=job(124).last_seen,
+        apply_url_raw=job(124).apply_url_raw,
+    )
+    outcome = DetailFetch(
+        FEED_DETAIL_PREFIX + copy.id,
+        resolved=marker == "successful",
+        failed=marker != "successful",
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW,
+                quarantined=(copy,),
+                detail_fetches=(outcome,),
+            )
+        )
+        await seed(repo, job())
+        restored = await repo.get_job(copy.id)
+        assert restored is not None and restored.duplicate_of == job().id
+        assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+
+
+async def test_failed_marker_does_not_keep_stale_inherited_quarantine(db_path: Path) -> None:
+    from stage.domain import DetailFetch, RejectionReason
+
+    copy = QuarantinedJob(
+        id=job(124).id,
+        source="test-feed",
+        company="Acme",
+        title_raw=job(124).title_raw,
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase=f"copy of {job().id} rejected for phd",
+        first_seen=job(124).first_seen,
+        last_seen=job(124).last_seen,
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW,
+                quarantined=(copy,),
+                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + copy.id, failed=True),),
+            )
+        )
+        preview = await repo.preview_purge(NOW + timedelta(days=100))
+        result = await repo.purge(NOW + timedelta(days=100))
+        assert preview.forgotten == result.forgotten == 1
+        assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+
+
+def rejection_marker(path: Path, number: int = 123) -> tuple[int, int] | None:
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT resolved, failed FROM detail_fetches WHERE id = ?",
+            (FEED_REJECTION_PREFIX + job(number).id,),
+        ).fetchone()
+        return (int(row[0]), int(row[1])) if row else None
+
+
+@respx.mock
+@pytest.mark.parametrize("result", ["rejected", "accepted", "failed", "unsupported"])
+async def test_only_hydrated_text_that_is_rejected_records_verified_hold(
+    db_path: Path,
+    result: str,
+) -> None:
+    if result == "rejected":
+        response = httpx.Response(
+            200,
+            json=payload(
+                body="Applicants must be enrolled in a PhD program.",
+            ),
+        )
+    elif result == "accepted":
+        response = httpx.Response(200, json=payload())
+    else:
+        response = httpx.Response(404, json={"error": "missing"})
+    route = respx.get(GH + "123").mock(return_value=response)
+    row = (
+        replace(job(), apply_url_raw="https://unknown.example/job")
+        if result == "unsupported"
+        else job()
+    )
+    async with open_repository(db_path) as repo:
+        await seed(repo, row)
+        await hydrate(repo)
+        if result == "rejected":
+            assert await repo.get_job(row.id) is None
+            assert len(await repo.list_quarantined(QuarantineFilters(source="test-feed"))) == 1
+            assert rejection_marker(db_path) == (1, 0)
+            await seed(repo, replace(row, description="unverified summary"))
+            assert await repo.get_job(row.id) is None
+            assert (await repo.purge(NOW + timedelta(days=100))).forgotten == 0
+        else:
+            assert rejection_marker(db_path) is None
+    assert route.call_count == (0 if result == "unsupported" else 1)
+
+
+async def test_legacy_successful_direct_rejection_remains_conservatively_held(
+    db_path: Path,
+) -> None:
+    from stage.domain import DetailFetch, RejectionReason
+
+    legacy = QuarantinedJob(
+        id=job().id,
+        source="test-feed",
+        company="Acme",
+        title_raw=job().title_raw,
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase="phd required",
+        first_seen=job().first_seen,
+        last_seen=job().last_seen,
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW,
+                quarantined=(legacy,),
+                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + legacy.id, resolved=True),),
+            )
+        )
+        assert rejection_marker(db_path) is None
+        await seed(repo, replace(job(), description="unverified summary"))
+        assert await repo.get_job(legacy.id) is None
+        assert (await repo.purge(NOW + timedelta(days=100))).forgotten == 0
+
+
+@respx.mock
+async def test_accepted_hydration_is_not_later_mistaken_for_a_verified_rejection(
+    db_path: Path,
+) -> None:
+    from stage.domain import RejectionReason
+
+    respx.get(GH + "123").respond(200, json=payload())
+    async with open_repository(db_path) as repo:
+        await seed(repo, job())
+        await hydrate(repo)
+        assert rejection_marker(db_path) is None
+        later = QuarantinedJob(
+            id=job().id,
+            source="test-feed",
+            company="Acme",
+            title_raw=job().title_raw,
+            reason=RejectionReason.NOT_AN_INTERNSHIP,
+            matched_phrase="full time",
+            first_seen=job().first_seen,
+            last_seen=NOW,
+        )
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW,
+                quarantined=(later,),
+            )
+        )
+        await seed(repo, job())
+        assert await repo.get_job(job().id) is not None
+        assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))

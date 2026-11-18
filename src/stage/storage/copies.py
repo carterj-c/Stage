@@ -12,10 +12,10 @@ from stage.domain import (
     board_of,
     source_rank,
 )
-from stage.domain.visits import FEED_DETAIL_PREFIX
+from stage.domain.visits import FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, FEED_REJECTION_PREFIX
 from stage.storage.repository import Resolver, SourceBatch
 from stage.storage.rows import OPEN, UPSERT_JOB, job_from, job_params, quarantined_from
-from stage.storage.sql import EACH, fold_company, listed
+from stage.storage.sql import EACH, fold_company, listed, verified_feed_hold
 
 COPY_PREFIX = "copy of "
 _COPY_GLOB = f"{COPY_PREFIX}*"
@@ -221,8 +221,8 @@ def restore_copies(conn: sqlite3.Connection, accepted: Mapping[str, JobLevel]) -
         return
     rows = conn.execute(
         "SELECT * FROM quarantine q WHERE reason = ? AND matched_phrase GLOB ? "
-        "AND NOT EXISTS (SELECT 1 FROM detail_fetches d WHERE d.id = ? || q.id)",
-        (_DEGREE, _COPY_GLOB, FEED_DETAIL_PREFIX),
+        f"AND NOT {verified_feed_hold('q')}",
+        (_DEGREE, _COPY_GLOB, FEED_REJECTION_PREFIX, FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX),
     )
     back = [
         replace(as_job(entry, origin), level=accepted[origin])
