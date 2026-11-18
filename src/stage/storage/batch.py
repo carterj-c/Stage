@@ -25,6 +25,7 @@ from stage.storage.copies import (
     copies_of_rejected,
     duplicate_candidates,
     followers_of_rejected,
+    freshly_observed_eligible_copies,
 )
 from stage.storage.repository import Resolver, SourceBatch, SourceBatchResult
 from stage.storage.rows import (
@@ -464,7 +465,14 @@ class BatchWriter(Store):
                     (listed(j.id for j in without_description),),
                 )
             }
-            held_without_body = {job.id for job in without_description if job.id in old_reasons}
+            eligible_copies = freshly_observed_eligible_copies(
+                conn, batch, [job for job in without_description if job.id in old_reasons]
+            )
+            held_without_body = {
+                job.id
+                for job in without_description
+                if job.id in old_reasons and job.id not in eligible_copies
+            }
             conn.executemany(
                 "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
                 [

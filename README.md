@@ -482,9 +482,12 @@ without descriptions can release quant and the supported management and finance
 occupations, where graduate degrees are eligible. Rescreen can sharpen rejection
 reasons but does not establish whether a posting remains open, so it never releases
 quarantined postings without a fresh source listing. Each quarantined copy needs
-its own fresh listing; accepting a canonical posting does not reopen its stale copies.
-Degree and work authorization are reported as unknown until evidence is available. Other descriptionless roles
-remain quarantined until a fresh description is available.
+its own fresh listing; accepting a canonical posting does not reopen stale copies.
+A descriptionless copy can return when its matching open canonical has
+prior degree-eligible description evidence at least as recent as the copy's last
+observation. Its degree and work authorization remain unknown until evidence for
+the copy is available. Other descriptionless roles remain quarantined until a
+fresh description is available.
 
 Workday and SmartRecruiters queue eligible quarantined postings for job pages,
 including location rejections. The bounded queue advances across syncs even when

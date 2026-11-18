@@ -127,13 +127,15 @@ def test_accepted_board_copy_does_not_reopen_list_copy_without_its_listing(db_pa
     assert _board().id not in held
 
     fresh = latest + timedelta(hours=1)
-    listed = replace(_copy(fresh), description=OPEN_TO_ALL)
+    listed = _copy(fresh)
     repository.apply_source_batch(_screened("simplify", [listed], fresh))
     jobs, held = _state(repository)
     assert jobs[COPY] == _board().id
     assert COPY not in held
     restored = repository.get_job(COPY)
     assert restored is not None and restored.first_seen == NOW and restored.last_seen == fresh
+    assert restored.description == "" and restored.work_auth_flag is None
+    assert restored.degree_requirement.value == "unknown"
     repository.close()
 
 
@@ -312,12 +314,16 @@ def test_stale_quarantined_copy_stays_hidden_when_canonical_closes_until_fresh_l
     assert COPY in _state(repository)[1]
     assert repository.get_job(_board().id).status is JobStatus.CLOSED  # type: ignore[union-attr]
 
-    fresh = replace(_copy(observed), description=OPEN_TO_ALL)
-    repository.apply_source_batch(_screened("simplify", [fresh], observed))
+    repository.apply_source_batch(_screened("simplify", [_copy(observed)], observed))
+    assert repository.get_job(COPY) is None
+    assert COPY in _state(repository)[1]
+    with_description = observed + timedelta(hours=1)
+    fresh = replace(_copy(with_description), description=OPEN_TO_ALL)
+    repository.apply_source_batch(_screened("simplify", [fresh], with_description))
     restored = repository.get_job(COPY)
     assert restored is not None and restored.status is JobStatus.OPEN
     assert restored.duplicate_of is None
-    assert restored.first_seen == NOW and restored.last_seen == observed
+    assert restored.first_seen == NOW and restored.last_seen == with_description
     assert COPY not in _state(repository)[1]
     repository.close()
 
@@ -348,3 +354,92 @@ async def test_rescreen_does_not_restore_quarantined_copy_without_source_read(
         assert result.updated >= 1
         assert result.released == 0 and result.quarantine_waiting == 1
         assert await repository.get_job(COPY) is None
+
+
+def test_fresh_descriptionless_copy_requires_verified_identity(db_path: Path) -> None:
+    repository = _linked(db_path)
+    rejected = NOW + timedelta(hours=1)
+    accepted = NOW + timedelta(hours=2)
+    observed = NOW + timedelta(hours=3)
+    repository.apply_source_batch(_screened("greenhouse", [_board(DOCTORAL, rejected)], rejected))
+    repository.apply_source_batch(
+        _screened("greenhouse", [_board(OPEN_TO_ALL, accepted)], accepted)
+    )
+    changed = replace(
+        _copy(observed),
+        title_raw="Data Engineer Intern",
+        title_normalized="data engineer intern",
+        apply_url_raw="https://job-boards.greenhouse.io/acme/jobs/9999999",
+    )
+    repository.apply_source_batch(_screened("simplify", [changed], observed))
+    assert repository.get_job(COPY) is None
+    assert COPY in _state(repository)[1]
+    repository.close()
+
+
+def test_descriptionless_copy_needs_a_fresh_observation_and_resolver(db_path: Path) -> None:
+    repository = _linked(db_path)
+    rejected = NOW + timedelta(hours=1)
+    accepted = NOW + timedelta(hours=2)
+    observed = NOW + timedelta(hours=3)
+    repository.apply_source_batch(_screened("greenhouse", [_board(DOCTORAL, rejected)], rejected))
+    repository.apply_source_batch(
+        _screened("greenhouse", [_board(OPEN_TO_ALL, accepted)], accepted)
+    )
+    kept, rejected_rows = normalize_batch([_copy(observed)])
+    assert not rejected_rows
+    repository.apply_source_batch(
+        SourceBatch(source="simplify", run_started_at=observed, jobs=kept)
+    )
+    assert repository.get_job(COPY) is None
+    assert COPY in _state(repository)[1]
+
+    later = observed + timedelta(hours=1)
+    repository.apply_source_batch(_screened("simplify", [_copy(later)], later))
+    assert repository.get_job(COPY) is None
+    assert COPY in _state(repository)[1]
+    refreshed = later + timedelta(hours=1)
+    repository.apply_source_batch(
+        _screened("greenhouse", [_board(OPEN_TO_ALL, refreshed)], refreshed)
+    )
+    latest = refreshed + timedelta(hours=1)
+    repository.apply_source_batch(_screened("simplify", [_copy(latest)], latest))
+    restored = repository.get_job(COPY)
+    assert restored is not None and restored.duplicate_of == _board().id
+    assert restored.first_seen == NOW and restored.last_seen == latest
+    assert restored.work_auth_flag is None
+    repository.close()
+
+
+def test_old_copy_object_is_not_current_source_evidence(db_path: Path) -> None:
+    repository = _linked(db_path)
+    rejected = NOW + timedelta(hours=1)
+    accepted = NOW + timedelta(hours=2)
+    attempted = NOW + timedelta(hours=3)
+    repository.apply_source_batch(_screened("greenhouse", [_board(DOCTORAL, rejected)], rejected))
+    repository.apply_source_batch(
+        _screened("greenhouse", [_board(OPEN_TO_ALL, accepted)], accepted)
+    )
+    repository.apply_source_batch(_screened("simplify", [_copy(NOW)], attempted))
+    assert repository.get_job(COPY) is None
+    assert COPY in _state(repository)[1]
+    repository.close()
+
+
+def test_fresh_copy_cannot_use_canonical_description_that_excludes_it(db_path: Path) -> None:
+    repository = _linked(db_path)
+    rejected = NOW + timedelta(hours=1)
+    accepted = NOW + timedelta(hours=2)
+    observed = NOW + timedelta(hours=3)
+    repository.apply_source_batch(_screened("greenhouse", [_board(DOCTORAL, rejected)], rejected))
+    repository.apply_source_batch(
+        _screened("greenhouse", [_board(OPEN_TO_ALL, accepted)], accepted)
+    )
+    repository._conn.execute(
+        "UPDATE jobs SET description = ? WHERE id = ?", (DOCTORAL, _board().id)
+    )
+    repository._conn.commit()
+    repository.apply_source_batch(_screened("simplify", [_copy(observed)], observed))
+    assert repository.get_job(COPY) is None
+    assert COPY in _state(repository)[1]
+    repository.close()

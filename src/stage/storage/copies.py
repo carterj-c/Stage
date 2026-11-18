@@ -1,9 +1,11 @@
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from functools import lru_cache
 
 from stage.domain import (
     Job,
+    JobStatus,
     QuarantinedJob,
     RejectionReason,
     SourceSignals,
@@ -12,7 +14,7 @@ from stage.domain import (
 )
 from stage.storage.repository import Resolver, SourceBatch
 from stage.storage.rows import OPEN, job_from, quarantined_from
-from stage.storage.sql import EACH, fold_company, listed
+from stage.storage.sql import EACH, fold_company, listed, to_text
 
 COPY_PREFIX = "copy of "
 _COPY_GLOB = f"{COPY_PREFIX}*"
@@ -115,6 +117,50 @@ def _main_copy(resolve: Resolver, job: Job, candidates: Sequence[Job]) -> str:
         if link.duplicate_id == job.id:
             return link.canonical_id
     return ""
+
+
+def freshly_observed_eligible_copies(
+    conn: sqlite3.Connection, batch: SourceBatch, jobs: Sequence[Job]
+) -> frozenset[str]:
+    from stage.classify import screen_degree_scope
+
+    if batch.resolve_duplicates is None or not jobs:
+        return frozenset()
+    observed = {
+        job.id: job
+        for job in jobs
+        if job.source == batch.source
+        and job.status is JobStatus.OPEN
+        and to_text(job.last_seen) >= to_text(batch.run_started_at)
+    }
+    rows = conn.execute(
+        f"SELECT id, matched_phrase, last_seen FROM quarantine WHERE reason = ? AND id IN {EACH}",
+        (_DEGREE, listed(observed)),
+    )
+    inherited = {
+        str(row["id"]): (copied_from(str(row["matched_phrase"]))[0], str(row["last_seen"]))
+        for row in rows
+    }
+    origins = {origin for origin, _ in inherited.values() if origin}
+    parents = {
+        job.id: job
+        for job in map(
+            job_from,
+            conn.execute(
+                f"SELECT * FROM jobs WHERE id IN {EACH} AND status = ? AND duplicate_of IS NULL",
+                (listed(origins), OPEN),
+            ),
+        )
+    }
+    return frozenset(
+        ident
+        for ident, (origin, last_observed) in inherited.items()
+        if (parent := parents.get(origin)) is not None
+        and parent.description.strip()
+        and to_text(parent.last_seen) >= last_observed
+        and _main_copy(batch.resolve_duplicates, observed[ident], (parent,)) == origin
+        and screen_degree_scope(replace(observed[ident], description=parent.description)) is None
+    )
 
 
 class _Near[T]:
