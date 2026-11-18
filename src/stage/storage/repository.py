@@ -68,6 +68,7 @@ class SourceBatch:
     resolve_duplicates: Resolver | None = None
 
     detail_queue_cursor: str | None = None
+    detail_queue_selected: tuple[str, ...] | None = None
     closes_whole_source: bool = False
     list_sources: frozenset[str] = frozenset()
 
@@ -102,7 +103,14 @@ class Repository(Protocol):
     def stale_members(self, source: str, before: datetime) -> list[SourceVisit]:
         pass
 
-    def detail_queue(self, source: str, limit: int) -> list[str]:
+    def detail_queue(
+        self,
+        source: str,
+        limit: int,
+        boards: Collection[str] | None = None,
+        ids: Collection[str] | None = None,
+        now: datetime | None = None,
+    ) -> list[str]:
         pass
 
     def detail_queue_size(self, source: str) -> int:
@@ -292,6 +300,9 @@ class Repository(Protocol):
         pass
 
     def integrity_findings(self, *, whole_file: bool = False) -> list[IntegrityFinding]:
+        pass
+
+    def description_coverage(self) -> dict[str, tuple[int, int]]:
         pass
 
     def composition(self, column: str) -> dict[str, int]:

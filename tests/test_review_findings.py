@@ -109,6 +109,9 @@ async def test_the_last_leg_of_a_workday_first_crawl_is_announced_as_news(
     _unpaced(monkeypatch)
     sent = _capture_discord(monkeypatch)
     offsets = _serve_interns(200)
+    respx.get(url__regex=r"https://big\.wd5\.myworkdayjobs\.com/wday/cxs/big/careers/job/.*").mock(
+        return_value=httpx.Response(200, json={"jobPostingInfo": {"jobDescription": "Intern role"}})
+    )
     db = tmp_path / "w.db"
 
     async def scheduled_run() -> SyncFinished:

@@ -12,6 +12,7 @@ from stage.domain import (
     OPEN_RETENTION_DAYS,
     REPOST,
     UNKNOWN_TERM,
+    DegreeRequirement,
     Job,
     JobStatus,
     LocationBucket,
@@ -42,6 +43,7 @@ from stage.storage.rows import (
     UPSERT_VISIT,
     job_from,
     job_params,
+    quarantined_from,
     quarantined_params,
     rate_state_params,
     stored_locations,
@@ -227,6 +229,61 @@ def _reject(
     remember_heirs(conn, sorted(heirs.items()), stamp)
     conn.execute(f"DELETE FROM jobs WHERE id IN {EACH}", (listed(leaving),))
     return entries, heirs
+
+
+def _hold_bamboo(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
+    if batch.source != "bamboohr":
+        return batch
+    ids = {job.id for job in batch.jobs} | {entry.id for entry in batch.quarantined}
+    ids.update(entry.id for entry in batch.detail_fetches)
+    rows = conn.execute(
+        f"SELECT q.*, d.fetched_at AS detail_at FROM quarantine q "
+        f"LEFT JOIN detail_fetches d ON d.id = q.id WHERE q.id IN {EACH}",
+        (listed(ids),),
+    )
+    previous = {
+        str(row["id"]): (quarantined_from(row), from_text(row["detail_at"])) for row in rows
+    }
+    resolved = {entry.id for entry in batch.detail_fetches if entry.resolved and not entry.failed}
+    empty = {job.id for job in batch.jobs if job.id in previous and not job.description.strip()}
+    held = empty | {
+        ident
+        for ident, (entry, fetched) in previous.items()
+        if ident not in resolved
+        or entry.last_seen > batch.run_started_at
+        or (fetched is not None and fetched > batch.run_started_at)
+    }
+    conn.executemany(
+        "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
+        [(to_text(job.last_seen), job.id) for job in batch.jobs if job.id in held],
+    )
+    rejected = tuple(
+        replace(
+            entry,
+            reason=previous[entry.id][0].reason,
+            matched_phrase=previous[entry.id][0].matched_phrase,
+            last_seen=max(entry.last_seen, previous[entry.id][0].last_seen),
+        )
+        if entry.id in held
+        else entry
+        for entry in batch.quarantined
+    )
+    stale = {
+        ident
+        for ident, (entry, fetched) in previous.items()
+        if entry.last_seen > batch.run_started_at
+        or (fetched is not None and fetched > batch.run_started_at)
+    }
+    return replace(
+        batch,
+        jobs=tuple(job for job in batch.jobs if job.id not in held),
+        quarantined=rejected,
+        detail_fetches=tuple(
+            entry
+            for entry in batch.detail_fetches
+            if entry.id not in stale and (entry.id not in empty or not entry.resolved)
+        ),
+    )
 
 
 def _crawl(conn: sqlite3.Connection, batch: SourceBatch, stamp: str) -> None:
@@ -442,20 +499,80 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
+            batch = _hold_bamboo(conn, batch)
+            selected = (
+                batch.detail_queue_selected
+                if batch.detail_queue_selected is not None
+                else (batch.detail_queue_cursor,)
+                if batch.detail_queue_cursor is not None
+                else ()
+            )
+            cursors = {board_of(ident, batch.source): ident for ident in selected}
+            last = batch.detail_queue_cursor or (selected[-1] if selected else None)
+            if last is not None:
+                cursors[batch.source] = last
+            conn.executemany(
+                "INSERT INTO detail_queue_cursors (source, cursor) VALUES (?, ?) "
+                "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor",
+                cursors.items(),
+            )
+            supplied_bodies = {job.id for job in batch.jobs if job.description.strip()}
+            fresh_oracle = {
+                entry.id
+                for entry in batch.detail_fetches
+                if batch.source == "oracle_cloud"
+                and entry.resolved
+                and not entry.failed
+                and entry.id in supplied_bodies
+            }
+            if batch.source == "oracle_cloud":
+                proven = {
+                    saved.id: saved
+                    for saved in map(
+                        job_from,
+                        conn.execute(
+                            "SELECT j.* FROM jobs j JOIN oracle_full_details f ON f.id = j.id "
+                            f"WHERE j.id IN {EACH}",
+                            (listed(job.id for job in batch.jobs),),
+                        ),
+                    )
+                }
+
+                def preserve_oracle_detail(job: Job) -> Job:
+                    if job.id in fresh_oracle:
+                        return job
+                    saved = proven.get(job.id)
+                    if saved is None:
+                        return replace(
+                            job,
+                            description="",
+                            work_auth_flag=None,
+                            degree_requirement=DegreeRequirement.UNKNOWN,
+                        )
+                    screened_body = job.description == saved.description
+                    return replace(
+                        job,
+                        description=saved.description,
+                        work_auth_flag=job.work_auth_flag
+                        if screened_body
+                        else saved.work_auth_flag,
+                        degree_requirement=(
+                            job.degree_requirement if screened_body else saved.degree_requirement
+                        ),
+                    )
+
+                batch = replace(batch, jobs=tuple(map(preserve_oracle_detail, batch.jobs)))
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
-            if batch.detail_queue_cursor is not None:
-                conn.execute(
-                    "INSERT INTO detail_queue_cursors (source, cursor) VALUES (?, ?) "
-                    "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor",
-                    (batch.source, batch.detail_queue_cursor),
-                )
             without_description = [
                 job
                 for job in batch.jobs
                 if not job.description.strip()
-                and not any(
-                    role is RoleCategory.QUANT or role.value in occupation_lexicon()
-                    for role in (job.role, *job.roles)
+                and (
+                    job.source == "oracle_cloud"
+                    or not any(
+                        role is RoleCategory.QUANT or role.value in occupation_lexicon()
+                        for role in (job.role, *job.roles)
+                    )
                 )
             ]
             old_reasons = {
@@ -471,8 +588,17 @@ class BatchWriter(Store):
             held_without_body = {
                 job.id
                 for job in without_description
-                if job.id in old_reasons and job.id not in eligible_copies
+                if job.id in old_reasons
+                and (job.source == "oracle_cloud" or job.id not in eligible_copies)
             }
+            if batch.source == "oracle_cloud":
+                held_without_body.update(
+                    str(row["id"])
+                    for row in conn.execute(
+                        f"SELECT id FROM quarantine WHERE id IN {EACH}",
+                        (listed(job.id for job in batch.jobs if job.id not in fresh_oracle),),
+                    )
+                )
             conn.executemany(
                 "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
                 [
@@ -506,6 +632,11 @@ class BatchWriter(Store):
             )
             jobs, diverted = copies_of_rejected(conn, batch, jobs)
             conn.executemany(UPSERT_JOB, [job_params(job) for job in jobs])
+            if batch.source == "oracle_cloud":
+                conn.executemany(
+                    "INSERT OR IGNORE INTO oracle_full_details (id) VALUES (?)",
+                    [(job.id,) for job in jobs if job.id in fresh_oracle and job.description],
+                )
             quarantined, heirs = _reject(conn, batch, batch.quarantined + diverted, known, stamp)
             conn.execute(
                 f"DELETE FROM quarantine WHERE id IN {EACH}",

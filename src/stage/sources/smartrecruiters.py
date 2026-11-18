@@ -7,7 +7,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 from stage.domain import Company, DetailFetch, Job, Platform, board_key, job_id
-from stage.http import HttpClient, HttpError
+from stage.http import HttpClient, HttpError, RequestRefusedError
 from stage.sources import register
 from stage.sources._text import collapse_whitespace, strip_html
 from stage.sources.base import (
@@ -161,21 +161,31 @@ class SmartRecruitersAdapter:
         wanted: set[str],
     ) -> tuple[list[tuple[SmartRecruitersPosting, Job]], list[DetailFetch]]:
         outcomes: list[DetailFetch] = []
-        merged: list[tuple[SmartRecruitersPosting, Job]] = []
+        fetched: dict[str, str | None] = {}
         for posting, job in paired:
-            if job.id not in wanted:
-                merged.append((posting, job))
+            if job.id not in wanted or job.id in fetched:
                 continue
+            fetched[job.id] = None
             url = DETAIL_URL.format(slug=safe_slug(company.slug), posting=posting.id)
             try:
                 response = await client.get_json(url, revalidate=True)
+            except RequestRefusedError:
+                continue
             except (HttpError, httpx.HTTPError):
                 outcomes.append(DetailFetch(id=job.id, resolved=False, failed=True))
-                merged.append((posting, job))
                 continue
             body = _description_from(response.payload)
+            fetched[job.id] = body
             outcomes.append(DetailFetch(id=job.id, resolved=bool(body)))
-            merged.append((posting, replace(job, description=body) if body else job))
+        merged = [
+            (
+                posting,
+                replace(job, description=description)
+                if (description := fetched.get(job.id))
+                else job,
+            )
+            for posting, job in paired
+        ]
         return merged, outcomes
 
     def _validate(

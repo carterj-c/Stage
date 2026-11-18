@@ -540,6 +540,9 @@ async def test_resumable_crawl_reconciles_only_after_the_terminal_page(
         )
 
     respx.post(CXS).mock(side_effect=page)
+    respx.get(
+        url__regex=r"https://cae\.wd3\.myworkdayjobs\.com/wday/cxs/cae/career/job/.*"
+    ).respond(404)
     monkeypatch.setattr(sync_module, "resolve", lambda *_: UNPACED)
     old = Job(
         id=job_id("workday", "cae-career", "R99999"),
@@ -611,6 +614,9 @@ async def test_a_resumed_crawl_rechecks_the_total_and_closes_nothing_when_the_bo
         )
 
     respx.post(CXS).mock(side_effect=page)
+    respx.get(
+        url__regex=r"https://cae\.wd3\.myworkdayjobs\.com/wday/cxs/cae/career/job/.*"
+    ).respond(404)
     monkeypatch.setattr(sync_module, "resolve", lambda *_: UNPACED)
     old = Job(
         id=job_id("workday", "cae-career", "R99999"),
@@ -669,6 +675,9 @@ async def test_an_unfinished_resume_is_discarded_after_the_second_workday_pass(
         )
 
     respx.post(CXS).mock(side_effect=page)
+    respx.get(
+        url__regex=r"https://cae\.wd3\.myworkdayjobs\.com/wday/cxs/cae/career/job/.*"
+    ).respond(404)
     monkeypatch.setattr(sync_module, "resolve", lambda *_: UNPACED)
     old = Job(
         id=job_id("workday", "cae-career", "R99999"),
@@ -1959,7 +1968,7 @@ async def test_two_syncs_advance_past_missing_quarantined_details(
             pass
         assert detail.call_count == 0
         assert await repo.get_job(current.id) is not None
-        second = await repo.detail_queue("workday", 2)
+        second = await repo.detail_queue("workday", 2, ids=[current.id])
         assert current.id in second
         later = NOW + timedelta(hours=1)
         async for _ in sync(

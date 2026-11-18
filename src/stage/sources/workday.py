@@ -1,8 +1,9 @@
 import re
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, ClassVar
+from urllib.parse import unquote
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +28,7 @@ from stage.http import (
     CaptivePortalError,
     HttpClient,
     HttpError,
+    RequestRefusedError,
     failure_text,
 )
 from stage.lexicon import fold, internship_lexicon, workday_facet_lexicon
@@ -258,12 +260,15 @@ class WorkdayAdapter:
         ceiling: int,
         full_reads: Sequence[str] = (),
         glances: Collection[str] = (),
+        queued_details: int = 0,
     ) -> tuple[dict[str, int], int]:
         if not companies:
             raise ValueError("a Workday crawl needs at least one board")
         available = max(1, ceiling - cls.retry_reserve)
         budgets = {company.registry_key: 1 for company in companies}
         remaining = max(0, available - len(budgets))
+        reserved_details = min(cls.detail_budget, queued_details, (remaining + 1) // 2)
+        remaining -= reserved_details
         demands: list[tuple[int, str]] = []
         for company in companies:
             crawl = crawls.get(board_key(cls.name, _board(company)))
@@ -295,8 +300,9 @@ class WorkdayAdapter:
             extra = max(0, min(remaining, cls.crawl_page_cap + SEARCH_PAGES - budgets[key]))
             budgets[key] += extra
             remaining -= extra
-        details = min(cls.detail_budget, max(0, remaining))
-        remaining = max(0, remaining - details - cls.check_reserve)
+        extra_details = min(cls.detail_budget - reserved_details, max(0, remaining))
+        details = reserved_details + extra_details
+        remaining = max(0, remaining - extra_details - cls.check_reserve)
         for key in full_reads:
             if key not in budgets:
                 continue
@@ -342,6 +348,7 @@ class WorkdayAdapter:
         full_read: bool = False,
         size_known: bool = False,
         search: bool = True,
+        detail_selector: Callable[[Sequence[str]], Awaitable[Sequence[str]]] | None = None,
     ) -> FetchResult:
         if page_budget < 1:
             raise ValueError("Workday page budget must be positive")
@@ -547,7 +554,8 @@ class WorkdayAdapter:
         internship_facets = workday_facet_lexicon()[0]
         faceted = "internship" if set(applied) & set(internship_facets) else ""
         paired = [(posting, _to_job(company, posting, now, faceted)) for posting in postings]
-        wanted = set(details)
+        candidates = [job.id for posting, job in paired if _safe_detail_path(posting.externalPath)]
+        wanted = set(await detail_selector(candidates) if detail_selector is not None else details)
         fetched: list[DetailFetch] = []
         if wanted:
             paired, fetched = await _attach_descriptions(company, client, paired, wanted)
@@ -798,6 +806,24 @@ def _hidden(row: Any) -> bool:
     return isinstance(row, dict) and not row.get("title") and not row.get("externalPath")
 
 
+def _safe_detail_path(path: str) -> bool:
+    decoded = path
+    for _ in range(5):
+        if (
+            not decoded.startswith("/job/")
+            or len(decoded) <= len("/job/")
+            or any(char in decoded for char in "\\?#")
+            or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+            or any(part in {".", ".."} for part in decoded.split("/"))
+        ):
+            return False
+        expanded = unquote(decoded)
+        if expanded == decoded:
+            return True
+        decoded = expanded
+    return False
+
+
 async def _attach_descriptions(
     company: Company,
     client: HttpClient,
@@ -808,32 +834,36 @@ async def _attach_descriptions(
         company.workday_tenant or "", company.workday_site or "", company.workday_dc or ""
     )
     outcomes: list[DetailFetch] = []
-    merged: list[tuple[WorkdayPosting, Job]] = []
+    fetched: dict[str, tuple[str, str] | None] = {}
     for posting, job in paired:
-        if job.id not in wanted or not posting.externalPath:
-            merged.append((posting, job))
+        if job.id not in wanted or job.id in fetched or not _safe_detail_path(posting.externalPath):
             continue
-        path = posting.externalPath
-        url = f"https://{host}/wday/cxs/{company.workday_tenant}/{company.workday_site}{path}"
+        fetched[job.id] = None
+        url = f"https://{host}/wday/cxs/{company.workday_tenant}/{company.workday_site}{posting.externalPath}"
         try:
             response = await client.get_json(url, revalidate=True)
+        except RequestRefusedError:
+            continue
         except (HttpError, httpx.HTTPError):
             outcomes.append(DetailFetch(id=job.id, resolved=False, failed=True))
-            merged.append((posting, job))
             continue
         body = _description_from(response.payload)
-        places = _locations_from(response.payload) if counts_locations(job.location_raw) else ""
+        fetched[job.id] = (body, _locations_from(response.payload))
         outcomes.append(DetailFetch(id=job.id, resolved=bool(body)))
-        merged.append(
-            (
-                posting,
-                replace(
-                    job,
-                    description=body or job.description,
-                    location_raw=places or job.location_raw,
-                ),
+
+    merged: list[tuple[WorkdayPosting, Job]] = []
+    for posting, job in paired:
+        result = fetched.get(job.id)
+        if result is not None:
+            body, places = result
+            job = replace(
+                job,
+                description=body or job.description,
+                location_raw=(places or job.location_raw)
+                if counts_locations(job.location_raw)
+                else job.location_raw,
             )
-        )
+        merged.append((posting, job))
     return merged, outcomes
 
 

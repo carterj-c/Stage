@@ -18,6 +18,7 @@ SEMICOLONS_KEPT = {
     ("cli/render/__init__.py", "; "),
     ("services/discover.py", "findReqs;siteNumber={},limit=1"),
     ("sources/oracle_cloud.py", "findReqs;siteNumber={}{},offset={},limit={}"),
+    ("sources/oracle_cloud.py", "ById;Id={},siteNumber={}"),
     (
         "http/client.py",
         "stage-cli/{} (+https://pypi.org/project/stage-cli/; internship aggregator)",

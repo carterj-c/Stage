@@ -289,6 +289,18 @@ class PostingReads(Store):
             counts.setdefault(str(row["company"]), {})[str(row["source"])] = int(row["total"])
         return counts
 
+    def description_coverage(self) -> dict[str, tuple[int, int]]:
+        counts: dict[str, tuple[int, int]] = {}
+        for row in self._conn.execute(
+            "SELECT source, COUNT(*) AS total, "
+            "SUM(CASE WHEN length(trim(description, ?)) > 0 "
+            "THEN 1 ELSE 0 END) AS with_description FROM jobs "
+            "WHERE duplicate_of IS NULL GROUP BY source ORDER BY total DESC, source",
+            ("".join(chr(i) for i in range(0x3100) if chr(i).isspace()),),
+        ):
+            counts[str(row["source"])] = (int(row["total"]), int(row["with_description"]))
+        return counts
+
     def composition(self, column: str) -> dict[str, int]:
         if column not in _COMPOSITION_COLUMNS:
             raise ValueError(

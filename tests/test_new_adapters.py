@@ -195,11 +195,14 @@ def test_every_adapter_declares_a_budget_matching_whether_it_carries_bodies() ->
         company = _company(CASES[name][0])
         assert adapter.plan(company), f"{name} reaches its bodies through the listing request"
 
-    for name in set(CASES) - carries_bodies:
+    for name in set(CASES) - carries_bodies - {"jobvite", "bamboohr"}:
         adapter = get_adapter(name)
         assert adapter.detail_budget == 0, (
             f"{name} has no detail fixture, so any budget above zero is blind"
         )
+
+    assert get_adapter("jobvite").detail_budget > 0
+    assert get_adapter("bamboohr").detail_budget > 0
 
 
 def test_every_registry_slug_adapter_refuses_a_slug_that_could_rewrite_its_target() -> None:

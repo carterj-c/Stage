@@ -157,10 +157,24 @@ class DoctorReport:
         return not self.integrity_problems
 
 
+DESCRIPTION_COVERAGE_NOTE = "Coverage measures description presence, not completeness."
+
+
+@dataclass(frozen=True, slots=True)
+class DescriptionCoverage:
+    total_jobs: int
+    with_description: int
+
+    @property
+    def percentage(self) -> float:
+        return 100 * self.with_description / self.total_jobs if self.total_jobs else 0.0
+
+
 @dataclass(frozen=True, slots=True)
 class StatsReport:
     runs: tuple[SyncRun, ...]
     composition: dict[str, dict[str, int]]
+    description_coverage: dict[str, DescriptionCoverage]
     total_jobs: int
     duplicates: int
     quarantined: dict[str, int]
@@ -284,6 +298,10 @@ async def statistics(repository: AsyncRepository, *, history: int = RUN_HISTORY)
     return StatsReport(
         runs=tuple(await repository.run_history(history)),
         composition=composition,
+        description_coverage={
+            source: DescriptionCoverage(total, described)
+            for source, (total, described) in (await repository.description_coverage()).items()
+        },
         total_jobs=await repository.count_jobs(JobFilters(status=None, limit=0)),
         duplicates=await repository.count_duplicates(),
         quarantined=await repository.quarantine_reason_counts(),

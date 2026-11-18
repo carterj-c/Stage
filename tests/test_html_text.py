@@ -15,6 +15,9 @@ def test_script_and_style_content_never_becomes_description_text() -> None:
 def test_block_tags_become_line_breaks_and_entities_are_decoded() -> None:
     assert strip_html("<li>A&amp;B</li><li>C</li>") == "A&B\nC"
     assert strip_html("Caf&eacute; &lt;b&gt;bold&lt;/b&gt;") == "Café bold"
+    assert strip_html("<p>Experience &lt; 5 years and GPA &gt; 3</p>") == (
+        "Experience < 5 years and GPA > 3"
+    )
 
 
 def test_control_characters_never_survive_extraction() -> None:

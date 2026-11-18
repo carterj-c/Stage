@@ -23,10 +23,12 @@ from stage.domain import (
     SourceVisit,
     public_https_url,
 )
+from stage.domain.visits import ORACLE_DETAIL_REFRESH_DAYS
 from stage.storage.sql import fold_company, from_text, marks, required_time, to_text
 
 OPEN = JobStatus.OPEN.value
 CLOSED = JobStatus.CLOSED.value
+BAMBOO_QUARANTINE_REFRESH_DAYS = 7
 
 _LEGACY_LOCATIONS = {"other": "international", "remote": "unknown"}
 _STORED_LOCATIONS = {
@@ -96,6 +98,11 @@ UPSERT_JOB = upsert(
     [
         "first_seen = MIN(jobs.first_seen, excluded.first_seen)"
         if column == "first_seen"
+        else "description = CASE WHEN excluded.source = 'oracle_cloud' "
+        "AND excluded.description = '' AND EXISTS "
+        "(SELECT 1 FROM oracle_full_details f WHERE f.id = jobs.id) "
+        "THEN jobs.description ELSE excluded.description END"
+        if column == "description"
         else f"{column} = excluded.{column}"
         for column in JOB_COLUMNS[1:-1]
     ],
@@ -208,11 +215,16 @@ _FETCHED_AGAIN = (
 )
 _DETAIL_AGAIN = (
     *refreshed("fetched_at", "resolved"),
-    "attempts = CASE WHEN (EXISTS (SELECT 1 FROM quarantine q WHERE q.id = detail_fetches.id) "
+    "attempts = CASE WHEN excluded.source = 'bamboohr' "
+    f"AND julianday(excluded.fetched_at) - julianday(detail_fetches.fetched_at) >= "
+    f"{BAMBOO_QUARANTINE_REFRESH_DAYS} THEN 1 "
+    "WHEN (EXISTS (SELECT 1 FROM quarantine q WHERE q.id = detail_fetches.id) "
     "OR EXISTS (SELECT 1 FROM jobs j WHERE j.id = detail_fetches.id)) "
     "AND detail_fetches.fetched_at < "
     "(SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed') "
-    "THEN 1 ELSE detail_fetches.attempts + 1 END",
+    "THEN 1 WHEN excluded.source = 'oracle_cloud' "
+    "AND julianday(excluded.fetched_at) - julianday(detail_fetches.fetched_at) "
+    f">= {ORACLE_DETAIL_REFRESH_DAYS} THEN 1 ELSE detail_fetches.attempts + 1 END",
     "failed = excluded.failed",
 )
 UPSERT_DETAIL = upsert("detail_fetches", _FETCH_COLUMNS, "id", _DETAIL_AGAIN)

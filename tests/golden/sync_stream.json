@@ -39,7 +39,7 @@
  ],
  "rehearsal": [
   "event=SyncStarted sources=['bamboohr', 'greenhouse', 'lever', 'simplify', 'workday'] companies=8",
-  "event=BucketPlan bucket=bamboohr sources=['bamboohr'] planned=2 worst_case=2 ceiling=300",
+  "event=BucketPlan bucket=bamboohr sources=['bamboohr'] planned=2 worst_case=42 ceiling=300",
   "event=BucketPlan bucket=boards-api.greenhouse.io sources=['greenhouse'] planned=4 worst_case=8 ceiling=300",
   "event=BucketPlan bucket=raw.githubusercontent.com sources=['simplify'] planned=1 worst_case=1 ceiling=300",
   "event=BucketPlan bucket=workday sources=['workday'] planned=1 worst_case=66 ceiling=300",

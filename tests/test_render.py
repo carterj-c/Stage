@@ -211,6 +211,7 @@ def _stats(**overrides: object) -> StatsReport:
     defaults: dict[str, object] = {
         "runs": (),
         "composition": {"source": {"greenhouse": 10, "lever": 5}},
+        "description_coverage": {},
         "total_jobs": 15,
         "duplicates": 2,
         "quarantined": {"not-an-internship": 40},
@@ -894,3 +895,43 @@ def test_an_ordinary_failure_is_listed_under_failed_sources() -> None:
     )
 
     assert "Failed sources" in said and "greenhouse/Pretium" in said
+
+
+def test_stats_shows_description_presence_counts_and_percentages() -> None:
+    from stage.services.health import DescriptionCoverage
+
+    report = _stats(
+        description_coverage={
+            "greenhouse": DescriptionCoverage(3, 1),
+            "workday": DescriptionCoverage(2, 0),
+        }
+    )
+    output = _paint(render_stats, report, NOW)
+
+    assert "Description coverage (canonical postings)" in output
+    assert "with desc" in output
+    assert "33.3%" in output
+    assert "0.0%" in output
+    assert "presence, not completeness" in output
+
+
+def test_stats_description_coverage_handles_no_canonical_postings() -> None:
+    output = _paint(render_stats, _stats(total_jobs=0, composition={}), NOW)
+
+    assert "No canonical postings for description coverage" in output
+    assert "presence, not completeness" in output
+
+
+def test_stats_description_coverage_respects_all() -> None:
+    from stage.services.health import DescriptionCoverage
+
+    report = _stats(
+        composition={},
+        description_coverage={f"src{index}": DescriptionCoverage(1, 1) for index in range(12)},
+    )
+    limited = _paint(render_stats, report, NOW, limit=5)
+    full = _paint(render_stats, report, NOW, limit=None)
+
+    assert "src11" not in limited
+    assert "--all" in limited
+    assert "src11" in full
