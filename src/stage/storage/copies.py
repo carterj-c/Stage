@@ -12,6 +12,7 @@ from stage.domain import (
     board_of,
     source_rank,
 )
+from stage.domain.liveness import PAGED_SOURCES
 from stage.storage.repository import Resolver, SourceBatch
 from stage.storage.rows import OPEN, job_from, quarantined_from
 from stage.storage.sql import EACH, fold_company, listed, to_text
@@ -147,8 +148,11 @@ def freshly_observed_eligible_copies(
         for job in map(
             job_from,
             conn.execute(
-                f"SELECT * FROM jobs WHERE id IN {EACH} AND status = ? AND duplicate_of IS NULL",
-                (listed(origins), OPEN),
+                "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = j.id "
+                f"WHERE j.id IN {EACH} AND j.source IN {EACH} AND j.status = ? "
+                "AND j.duplicate_of IS NULL AND d.source = j.source "
+                "AND d.resolved = 1 AND d.failed = 0 AND d.fetched_at = j.last_seen",
+                (listed(origins), listed(PAGED_SOURCES), OPEN),
             ),
         )
     }
