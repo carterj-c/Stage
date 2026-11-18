@@ -27,6 +27,7 @@ from stage.http import (
     CaptivePortalError,
     HttpClient,
     HttpError,
+    RequestRefusedError,
     failure_text,
 )
 from stage.lexicon import fold, internship_lexicon, workday_facet_lexicon
@@ -821,6 +822,9 @@ async def _attach_descriptions(
         url = f"https://{host}/wday/cxs/{company.workday_tenant}/{company.workday_site}{path}"
         try:
             response = await client.get_json(url, revalidate=True)
+        except RequestRefusedError:
+            merged.append((posting, job))
+            continue
         except (HttpError, httpx.HTTPError):
             outcomes.append(DetailFetch(id=job.id, resolved=False, failed=True))
             merged.append((posting, job))

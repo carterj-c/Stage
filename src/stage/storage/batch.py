@@ -439,6 +439,12 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
+            if batch.detail_queue_cursor is not None:
+                conn.execute(
+                    "INSERT INTO detail_queue_cursors (source, cursor) VALUES (?, ?) "
+                    "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor",
+                    (batch.source, batch.detail_queue_cursor),
+                )
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
             known = _first_seen(seen, started)

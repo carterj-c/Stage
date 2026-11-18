@@ -70,9 +70,25 @@ class DetailFetches(Store):
             return []
         scope = "" if boards is None else f"WHERE stage_board_of(id, ?) IN {EACH} "
         params = () if boards is None else (source, listed(boards))
+        cursor = self._conn.execute(
+            "SELECT cursor FROM detail_queue_cursors WHERE source = ?", (source,)
+        ).fetchone()
+        if cursor is None:
+            order = "rank, first_seen DESC, id"
+            rotation: tuple[object, ...] = ()
+        else:
+            ident = str(cursor[0])
+            previous = self._conn.execute(
+                "SELECT 0 FROM quarantine WHERE id = ? UNION ALL "
+                "SELECT 1 FROM jobs WHERE id = ? ORDER BY 1 LIMIT 1",
+                (ident, ident),
+            ).fetchone()
+            rank = int(previous[0]) if previous is not None else 1
+            order = "CASE WHEN rank > ? OR (rank = ? AND id > ?) THEN 0 ELSE 1 END, rank, id"
+            rotation = (rank, rank, ident)
         rows = self._conn.execute(
-            f"SELECT id FROM ({_QUEUE}) {scope}ORDER BY rank, first_seen DESC, id LIMIT ?",
-            (*_queued(source), *params, limit),
+            f"SELECT id FROM ({_QUEUE}) {scope}ORDER BY {order} LIMIT ?",
+            (*_queued(source), *params, *rotation, limit),
         )
         return [str(row["id"]) for row in rows]
 

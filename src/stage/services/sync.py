@@ -1334,6 +1334,7 @@ async def _run_company_source(
             forgotten_facets=tuple(harvest.forgotten_facets),
             workday_crawls=tuple(harvest.workday_crawls),
             detail_fetches=tuple(harvest.detail_outcomes),
+            detail_queue_cursor=plan.detail_queue[-1] if plan.detail_queue else None,
             visits=tuple(harvest.visits),
             resolve_duplicates=resolve_duplicates,
             list_sources=frozenset(get_feeds()),

@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel, ConfigDict
 
 from stage.domain import Company, DetailFetch, Job, Platform, job_id
-from stage.http import HttpClient, HttpError
+from stage.http import HttpClient, HttpError, RequestRefusedError
 from stage.sources import register
 from stage.sources._text import collapse_whitespace
 from stage.sources.base import (
@@ -224,6 +224,9 @@ class JobviteAdapter(BoardAdapter):
                     response = await client.get_text(url, revalidate=True)
                     if not response.not_modified:
                         body = await parse_page(_description, response.text, url)
+                except RequestRefusedError:
+                    jobs.append(job)
+                    continue
                 except (HttpError, httpx.HTTPError):
                     pass
             bodies[job.id] = body
