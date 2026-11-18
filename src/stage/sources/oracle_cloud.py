@@ -71,10 +71,7 @@ def _detail_body(payload: Any, identifier: str, summary: str) -> str:
     description = _text(row.ExternalDescriptionStr)
     if row.Id != identifier or not description:
         return ""
-    # A successful HTTP response carrying only the search blurb is not a full read.
-    if description in {_text(summary), _text(row.ShortDescriptionStr)}:
-        return ""
-    return "\n\n".join(
+    sections = [
         text
         for raw in (
             row.ExternalDescriptionStr,
@@ -84,7 +81,15 @@ def _detail_body(payload: Any, identifier: str, summary: str) -> str:
             row.OrganizationDescriptionStr,
         )
         if (text := _text(raw))
-    )
+    ]
+    summaries = [
+        text.casefold() for raw in (summary, row.ShortDescriptionStr) if (text := _text(raw))
+    ]
+    if summaries and not any(
+        all(section.casefold() not in known for known in summaries) for section in sections
+    ):
+        return ""
+    return "\n\n".join(sections)
 
 
 class OraclePage(BaseModel):

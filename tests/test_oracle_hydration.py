@@ -152,7 +152,8 @@ async def test_classified_legacy_short_summary_is_eligible_and_failures_retry(
             )
         assert await repo.detail_queue(ADAPTER.name, 20) == []
         stored = await repo.get_job(_id())
-        assert stored is not None and stored.description == jobs[0].description
+        assert stored is not None and stored.description == ""
+        assert stored.work_auth_flag is None
     assert detail.call_count == 3
 
 
@@ -166,7 +167,7 @@ async def test_classified_legacy_short_summary_is_eligible_and_failures_retry(
         {"items": [{"Id": "91731", "ExternalDescriptionStr": 42}]},
         _detail("other"),
         _detail(body=" "),
-        _detail(body="<b>Build</b> systems"),
+        {"items": [{"Id": "91731", "ExternalDescriptionStr": "<b>Build</b> systems"}]},
         {
             "items": [
                 {
@@ -295,3 +296,198 @@ async def test_queued_details_bypass_listing_and_detail_validators() -> None:
         assert result.jobs[0].description
         assert "if-none-match" not in listing.calls[-1].request.headers
         assert "if-none-match" not in detail.calls[-1].request.headers
+
+
+def test_matching_summary_with_extra_detail_sections_is_full() -> None:
+    payload = _detail(body="<p>Build systems</p>")
+    body = _detail_body(payload, "91731", "Build systems")
+    assert "Build systems" in body
+    assert "Responsibilities: build services" in body
+    assert "Qualifications: Python" in body
+
+
+@respx.mock
+async def test_quarantined_known_role_needs_fresh_detail_to_reopen(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.classify.scope import Rejection
+    from stage.domain import QuarantineFilters, RejectionReason
+    from stage.services import screening
+
+    def reject_body(job: Any) -> Rejection | None:
+        if "RESTRICTED" in job.description:
+            return Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "restricted requirement")
+        return None
+
+    monkeypatch.setattr(screening, "screen_is_cs_role", reject_body)
+    respx.get(ADAPTER.url_for(COMPANY)).respond(200, json=_listing(_posting()))
+    detail = respx.get(DETAIL_URL).respond(200, json=_detail(body="RESTRICTED requirement"))
+    async with _client() as client, open_repository(db_path) as repo:
+        full = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id()])
+        assert full.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name, run_started_at=NOW, detail_fetches=full.detail_fetches
+            ),
+            full.jobs,
+        )
+        assert await repo.get_job(_id()) is None
+        (held,) = await repo.list_quarantined(QuarantineFilters(limit=None))
+        assert held.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+        assert await repo.detail_queue(ADAPTER.name, 20) == []
+        listing = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(hours=1))
+        kept, rejected = normalize_batch(listing.jobs)
+        assert kept and not rejected  # Known-role exemption used to release this row.
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(source=ADAPTER.name, run_started_at=NOW + timedelta(hours=1)),
+            listing.jobs,
+        )
+        assert await repo.get_job(_id()) is None
+        (still_held,) = await repo.list_quarantined(QuarantineFilters(limit=None))
+        assert still_held.reason is held.reason
+        # Even a stale carried full body cannot reopen it without a fresh outcome.
+        stale, _ = normalize_batch([replace(listing.jobs[0], description="previous complete body")])
+        await repo.apply_source_batch(
+            SourceBatch(source=ADAPTER.name, run_started_at=NOW + timedelta(hours=2), jobs=stale)
+        )
+        assert await repo.get_job(_id()) is None
+        detail.respond(200, json=_detail(body="New complete posting; no restricted requirement."))
+        fresh = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(hours=3), details=[_id()])
+        assert fresh.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name,
+                run_started_at=NOW + timedelta(hours=3),
+                detail_fetches=fresh.detail_fetches,
+            ),
+            fresh.jobs,
+        )
+        saved = await repo.get_job(_id())
+        assert saved is not None and "New complete posting" in saved.description
+        assert not await repo.list_quarantined(QuarantineFilters(limit=None))
+
+
+@respx.mock
+async def test_rules_change_requeues_full_detail_and_failure_preserves_body(db_path: Path) -> None:
+    respx.get(ADAPTER.url_for(COMPANY)).respond(200, json=_listing(_posting()))
+    detail = respx.get(DETAIL_URL).respond(200, json=_detail())
+    async with _client() as client, open_repository(db_path) as repo:
+        full = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id()])
+        assert full.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name, run_started_at=NOW, detail_fetches=full.detail_fetches
+            ),
+            full.jobs,
+        )
+        assert await repo.detail_queue(ADAPTER.name, 20) == []
+        await repo.mark_screened(0)
+        await repo.mark_screened(1, at=NOW + timedelta(hours=1))
+        assert await repo.detail_queue(ADAPTER.name, 20) == [_id()]
+        detail.respond(404)
+        failure = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(hours=2), details=[_id()])
+        assert failure.detail_fetches == (DetailFetch(id=_id(), failed=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name,
+                run_started_at=NOW + timedelta(hours=2),
+                detail_fetches=failure.detail_fetches,
+            ),
+            failure.jobs,
+        )
+        stored = await repo.get_job(_id())
+        assert stored is not None and stored.description == full.jobs[0].description
+        assert await repo.detail_queue(ADAPTER.name, 20) == [_id()]
+        detail.respond(200, json=_detail(body="Updated complete content"))
+        refreshed = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(hours=3), details=[_id()])
+        assert refreshed.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name,
+                run_started_at=NOW + timedelta(hours=3),
+                detail_fetches=refreshed.detail_fetches,
+            ),
+            refreshed.jobs,
+        )
+        saved = await repo.get_job(_id())
+        assert saved is not None and "Updated complete content" in saved.description
+        assert await repo.detail_queue(ADAPTER.name, 20) == []
+
+
+def test_migration_hides_unverified_summaries_and_preserves_proven_bodies(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import closing
+
+    from stage.storage import migrations
+    from stage.storage.sqlite_repo import SqliteRepository
+
+    original = migrations.discover()
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: original[:4])
+        with closing(SqliteRepository.connect(db_path)) as repo:
+            for ident, source, body in (
+                (_id(), ADAPTER.name, "Legacy short summary"),
+                (_id("91732"), ADAPTER.name, "Verified full body"),
+                (_id("91733"), ADAPTER.name, "Unknown body after failed attempt"),
+                ("other:board:1", "other", "Other source body"),
+            ):
+                repo._conn.execute(
+                    "INSERT INTO jobs (id, source, company, title_raw, title_normalized, "
+                    "apply_url_raw, description, first_seen, last_seen, work_auth_known) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                    (
+                        ident,
+                        source,
+                        "Company",
+                        "Software Intern",
+                        "software intern",
+                        "https://example.com",
+                        body,
+                        NOW.isoformat(),
+                        NOW.isoformat(),
+                    ),
+                )
+            for ident, resolved, failed in ((_id("91732"), 1, 0), (_id("91733"), 0, 1)):
+                repo._conn.execute(
+                    "INSERT INTO detail_fetches (id, source, fetched_at, resolved, failed) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (ident, ADAPTER.name, NOW.isoformat(), resolved, failed),
+                )
+    with closing(SqliteRepository.connect(db_path)) as repo:
+        rows = {
+            row["id"]: row
+            for row in repo._conn.execute("SELECT id, description, work_auth_known FROM jobs")
+        }
+        assert rows[_id()]["description"] == "" and rows[_id()]["work_auth_known"] == 0
+        assert rows[_id("91733")]["description"] == ""
+        assert rows[_id("91732")]["description"] == "Verified full body"
+        assert rows["other:board:1"]["description"] == "Other source body"
+        archived = dict(
+            repo._conn.execute("SELECT id, description FROM oracle_unverified_descriptions")
+        )
+        assert archived == {
+            _id(): "Legacy short summary",
+            _id("91733"): "Unknown body after failed attempt",
+        }
+        assert repo.detail_queue(ADAPTER.name, 20) == [_id(), _id("91733")]
+        assert not repo._conn.execute(
+            "SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH ?", ("legacy",)
+        ).fetchall()
+        # A stale writer cannot cause the carry-forward path to trust an unverified body.
+        repo._conn.execute("UPDATE jobs SET description = ? WHERE id = ?", ("Stale summary", _id()))
+        assert repo.stored_details([_id()])[_id()][0] == ""
+        assert repo._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert migrations.migrate(repo._conn, db_path) == ()

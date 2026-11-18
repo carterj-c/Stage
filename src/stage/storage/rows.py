@@ -97,7 +97,9 @@ UPSERT_JOB = upsert(
         "first_seen = MIN(jobs.first_seen, excluded.first_seen)"
         if column == "first_seen"
         else "description = CASE WHEN excluded.source = 'oracle_cloud' "
-        "AND excluded.description = '' THEN jobs.description ELSE excluded.description END"
+        "AND excluded.description = '' AND EXISTS "
+        "(SELECT 1 FROM oracle_full_details f WHERE f.id = jobs.id) "
+        "THEN jobs.description ELSE excluded.description END"
         if column == "description"
         else f"{column} = excluded.{column}"
         for column in JOB_COLUMNS[1:-1]

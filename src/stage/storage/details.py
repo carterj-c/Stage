@@ -39,7 +39,8 @@ _QUEUED = (
     "((j.description = '' OR j.source = 'oracle_cloud') AND (j.source IN "
     "('workday', 'smartrecruiters', 'jobvite', 'oracle_cloud') "
     "OR j.term = ? OR j.role = ? OR j.work_auth_known = 0) "
-    "AND (j.source <> 'oracle_cloud' OR d.id IS NULL OR d.resolved = 0) "
+    "AND (j.source <> 'oracle_cloud' OR d.id IS NULL OR d.resolved = 0 "
+    "OR d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed')) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
     "OR (d.resolved = 1 AND d.attempts < ?) "
     "OR d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed'))) "
@@ -130,8 +131,11 @@ class DetailFetches(Store):
 
     def stored_details(self, ids: Collection[str]) -> dict[str, tuple[str, str]]:
         rows = self._conn.execute(
-            f"SELECT id, description, location_raw FROM jobs WHERE id IN {EACH} "
-            "AND (description <> '' OR NOT location_raw GLOB ?)",
+            "SELECT j.id, CASE WHEN j.source = 'oracle_cloud' AND NOT EXISTS "
+            "(SELECT 1 FROM oracle_full_details f WHERE f.id = j.id) THEN '' "
+            "ELSE j.description END AS description, j.location_raw FROM jobs j "
+            f"WHERE j.id IN {EACH} "
+            "AND (j.description <> '' OR NOT j.location_raw GLOB ?)",
             (listed(ids), LOCATION_COUNT_GLOB),
         )
         return {str(row["id"]): (str(row["description"]), str(row["location_raw"])) for row in rows}

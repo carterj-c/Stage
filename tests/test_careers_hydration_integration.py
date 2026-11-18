@@ -178,7 +178,9 @@ async def test_shared_legacy_database_retains_quarantine_and_rearms_scoped_queue
         assert senior.level is JobLevel.SENIOR
         assert senior.roles == (RoleCategory.FINANCE, RoleCategory.INVESTMENT_BANKING)
     with closing(SqliteRepository.connect(db_path)) as repo:
-        assert migrations.applied_versions(repo._conn) == (1, 2, 3, 4)
+        assert migrations.applied_versions(repo._conn) == tuple(
+            range(1, migrations.latest_version() + 1)
+        )
         assert migrations.migrate(repo._conn, db_path) == ()
         assert repo._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         row = repo._conn.execute(
