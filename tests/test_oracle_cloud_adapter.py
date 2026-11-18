@@ -72,7 +72,7 @@ async def test_oracle_paginates_and_maps_public_postings() -> None:
     ]
     first = result.jobs[0]
     assert first.apply_url_raw.endswith("/sites/jobsearch/job/101")
-    assert first.description == "Build systems Python"
+    assert first.description == ""
     assert first.source_posted_at == datetime(2026, 8, 1, tzinfo=UTC)
 
 

@@ -19,6 +19,7 @@ from stage.domain.liveness import (
     LivenessCheck,
 )
 from stage.domain.text import LOCATION_COUNT_GLOB
+from stage.domain.visits import ORACLE_DETAIL_REFRESH_DAYS
 from stage.storage.rows import (
     BAMBOO_QUARANTINE_REFRESH_DAYS,
     CLOSED,
@@ -38,23 +39,30 @@ BAMBOO_QUARANTINE_REFRESH = timedelta(days=BAMBOO_QUARANTINE_REFRESH_DAYS)
 _QUEUED = (
     "FROM jobs j LEFT JOIN detail_fetches d ON d.id = j.id "
     "WHERE j.source = ? AND j.status = ? AND ("
-    "(j.description = '' AND (j.source IN ('workday', 'smartrecruiters', 'jobvite', 'bamboohr') "
+    "((j.description = '' OR j.source = 'oracle_cloud') AND (j.source IN "
+    "('workday', 'smartrecruiters', 'jobvite', 'bamboohr', 'oracle_cloud') "
     "OR j.term = ? OR j.role = ? OR j.work_auth_known = 0) "
+    "AND (j.source <> 'oracle_cloud' OR d.id IS NULL OR d.resolved = 0 "
+    "OR d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed')) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
     "OR (d.resolved = 1 AND d.attempts < ?) "
     "OR d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed'))) "
-    "OR (j.location_raw GLOB ? AND (d.id IS NULL OR d.attempts < ?)))"
+    "OR (j.location_raw GLOB ? AND (d.id IS NULL OR d.attempts < ?)) "
+    "OR (j.source = 'oracle_cloud' AND d.id IS NOT NULL "
+    f"AND julianday(d.fetched_at) <= julianday(?) - {ORACLE_DETAIL_REFRESH_DAYS}))"
 )
 
 
 _AWAITING = (
     "FROM quarantine q LEFT JOIN detail_fetches d ON d.id = q.id "
     "WHERE q.source = ? AND (q.matched_phrase GLOB ? OR "
-    "(q.source IN ('workday', 'smartrecruiters', 'bamboohr') "
+    "(q.source IN ('workday', 'smartrecruiters', 'bamboohr', 'oracle_cloud') "
     "AND q.reason IN (?, ?, ?, ?, ?, ?))) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
     "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)) "
-    "OR (q.source = 'bamboohr' AND d.fetched_at <= ?))"
+    "OR (q.source = 'bamboohr' AND d.fetched_at <= ?) "
+    "OR (q.source = 'oracle_cloud' "
+    f"AND julianday(d.fetched_at) <= julianday(?) - {ORACLE_DETAIL_REFRESH_DAYS}))"
 )
 _QUEUE = (
     f"SELECT j.id, 1 AS rank, j.first_seen {_QUEUED} "
@@ -62,7 +70,7 @@ _QUEUE = (
 )
 
 
-def _queued(source: str, now: datetime | None = None) -> tuple[object, ...]:
+def _queued(source: str, now: datetime) -> tuple[object, ...]:
     return (
         source,
         OPEN,
@@ -72,6 +80,7 @@ def _queued(source: str, now: datetime | None = None) -> tuple[object, ...]:
         REREAD_ATTEMPTS,
         LOCATION_COUNT_GLOB,
         REREAD_ATTEMPTS,
+        to_text(now),
         source,
         f"*{AWAITING_PAGE}",
         RejectionReason.OUT_OF_SCOPE_DEGREE.value,
@@ -82,7 +91,8 @@ def _queued(source: str, now: datetime | None = None) -> tuple[object, ...]:
         RejectionReason.OUT_OF_SCOPE_LOCATION.value,
         MAX_DETAIL_ATTEMPTS,
         "rules:changed",
-        to_text((now or datetime.now(UTC)) - BAMBOO_QUARANTINE_REFRESH),
+        to_text(now - BAMBOO_QUARANTINE_REFRESH),
+        to_text(now),
     )
 
 
@@ -124,17 +134,22 @@ class DetailFetches(Store):
             "CASE WHEN source_cursor IS NULL THEN rank ELSE 0 END, "
             "CASE WHEN source_cursor IS NULL OR board > stage_board_of(source_cursor, ?) "
             "THEN 0 ELSE 1 END, board LIMIT ?",
-            (source, *_queued(source, now), *params, source, source, limit),
+            (source, *_queued(source, now or datetime.now(UTC)), *params, source, source, limit),
         )
         return [str(row["id"]) for row in rows]
 
     def detail_queue_size(self, source: str) -> int:
-        return count(self._conn, f"SELECT COUNT(*) FROM ({_QUEUE})", _queued(source))
+        return count(
+            self._conn, f"SELECT COUNT(*) FROM ({_QUEUE})", _queued(source, datetime.now(UTC))
+        )
 
     def stored_details(self, ids: Collection[str]) -> dict[str, tuple[str, str]]:
         rows = self._conn.execute(
-            f"SELECT id, description, location_raw FROM jobs WHERE id IN {EACH} "
-            "AND (description <> '' OR NOT location_raw GLOB ?)",
+            "SELECT j.id, CASE WHEN j.source = 'oracle_cloud' AND NOT EXISTS "
+            "(SELECT 1 FROM oracle_full_details f WHERE f.id = j.id) THEN '' "
+            "ELSE j.description END AS description, j.location_raw FROM jobs j "
+            f"WHERE j.id IN {EACH} "
+            "AND (j.description <> '' OR NOT j.location_raw GLOB ?)",
             (listed(ids), LOCATION_COUNT_GLOB),
         )
         return {str(row["id"]): (str(row["description"]), str(row["location_raw"])) for row in rows}

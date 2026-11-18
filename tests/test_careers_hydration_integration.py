@@ -178,7 +178,9 @@ async def test_shared_legacy_database_retains_quarantine_and_rearms_scoped_queue
         assert senior.level is JobLevel.SENIOR
         assert senior.roles == (RoleCategory.FINANCE, RoleCategory.INVESTMENT_BANKING)
     with closing(SqliteRepository.connect(db_path)) as repo:
-        assert migrations.applied_versions(repo._conn) == (1, 2, 3, 4)
+        assert migrations.applied_versions(repo._conn) == tuple(
+            range(1, migrations.latest_version() + 1)
+        )
         assert migrations.migrate(repo._conn, db_path) == ()
         assert repo._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         row = repo._conn.execute(
@@ -192,3 +194,42 @@ async def test_shared_legacy_database_retains_quarantine_and_rearms_scoped_queue
                 ).fetchone()[0]
                 == "workday:rbc-careers:a"
             )
+
+
+async def test_bamboo_and_oracle_quarantine_refresh_independently_in_shared_database(
+    db_path: Path,
+) -> None:
+    from stage.domain.visits import ORACLE_DETAIL_REFRESH_DAYS
+    from stage.storage.details import BAMBOO_QUARANTINE_REFRESH
+
+    bamboo = _job("bamboohr", "rbc", "a")
+    oracle = _job("oracle_cloud", "rbc", "b")
+    bamboo_held = to_quarantined(bamboo, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "phd"))
+    oracle_held = to_quarantined(oracle, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "phd"))
+    async with open_repository(db_path) as repo:
+        for source, held in (("bamboohr", bamboo_held), ("oracle_cloud", oracle_held)):
+            await repo.apply_source_batch(
+                SourceBatch(
+                    source=source,
+                    run_started_at=NOW,
+                    quarantined=(held,),
+                    detail_fetches=(DetailFetch(id=held.id, resolved=True),),
+                )
+            )
+        bamboo_due = NOW + BAMBOO_QUARANTINE_REFRESH
+        oracle_due = NOW + timedelta(days=ORACLE_DETAIL_REFRESH_DAYS)
+        assert bamboo_due < oracle_due
+        assert await repo.detail_queue("bamboohr", 10, now=bamboo_due) == [bamboo.id]
+        assert await repo.detail_queue("oracle_cloud", 10, now=bamboo_due) == []
+        assert await repo.detail_queue("oracle_cloud", 10, now=oracle_due) == [oracle.id]
+        assert (
+            await repo.detail_queue("oracle_cloud", 10, ["oracle_cloud:other"], now=oracle_due)
+            == []
+        )
+        assert await repo.detail_queue("oracle_cloud", 10, ids=["other"], now=oracle_due) == []
+        assert await repo.detail_queue("workday", 10, now=oracle_due) == []
+        assert await repo.get_job(bamboo.id) is None and await repo.get_job(oracle.id) is None
+        assert {q.id for q in await repo.list_quarantined(QuarantineFilters(limit=None))} == {
+            bamboo.id,
+            oracle.id,
+        }

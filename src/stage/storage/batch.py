@@ -12,6 +12,7 @@ from stage.domain import (
     OPEN_RETENTION_DAYS,
     REPOST,
     UNKNOWN_TERM,
+    DegreeRequirement,
     Job,
     JobStatus,
     LocationBucket,
@@ -515,14 +516,63 @@ class BatchWriter(Store):
                 "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor",
                 cursors.items(),
             )
+            supplied_bodies = {job.id for job in batch.jobs if job.description.strip()}
+            fresh_oracle = {
+                entry.id
+                for entry in batch.detail_fetches
+                if batch.source == "oracle_cloud"
+                and entry.resolved
+                and not entry.failed
+                and entry.id in supplied_bodies
+            }
+            if batch.source == "oracle_cloud":
+                proven = {
+                    saved.id: saved
+                    for saved in map(
+                        job_from,
+                        conn.execute(
+                            "SELECT j.* FROM jobs j JOIN oracle_full_details f ON f.id = j.id "
+                            f"WHERE j.id IN {EACH}",
+                            (listed(job.id for job in batch.jobs),),
+                        ),
+                    )
+                }
+
+                def preserve_oracle_detail(job: Job) -> Job:
+                    if job.id in fresh_oracle:
+                        return job
+                    saved = proven.get(job.id)
+                    if saved is None:
+                        return replace(
+                            job,
+                            description="",
+                            work_auth_flag=None,
+                            degree_requirement=DegreeRequirement.UNKNOWN,
+                        )
+                    screened_body = job.description == saved.description
+                    return replace(
+                        job,
+                        description=saved.description,
+                        work_auth_flag=job.work_auth_flag
+                        if screened_body
+                        else saved.work_auth_flag,
+                        degree_requirement=(
+                            job.degree_requirement if screened_body else saved.degree_requirement
+                        ),
+                    )
+
+                batch = replace(batch, jobs=tuple(map(preserve_oracle_detail, batch.jobs)))
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             without_description = [
                 job
                 for job in batch.jobs
                 if not job.description.strip()
-                and not any(
-                    role is RoleCategory.QUANT or role.value in occupation_lexicon()
-                    for role in (job.role, *job.roles)
+                and (
+                    job.source == "oracle_cloud"
+                    or not any(
+                        role is RoleCategory.QUANT or role.value in occupation_lexicon()
+                        for role in (job.role, *job.roles)
+                    )
                 )
             ]
             old_reasons = {
@@ -538,8 +588,17 @@ class BatchWriter(Store):
             held_without_body = {
                 job.id
                 for job in without_description
-                if job.id in old_reasons and job.id not in eligible_copies
+                if job.id in old_reasons
+                and (job.source == "oracle_cloud" or job.id not in eligible_copies)
             }
+            if batch.source == "oracle_cloud":
+                held_without_body.update(
+                    str(row["id"])
+                    for row in conn.execute(
+                        f"SELECT id FROM quarantine WHERE id IN {EACH}",
+                        (listed(job.id for job in batch.jobs if job.id not in fresh_oracle),),
+                    )
+                )
             conn.executemany(
                 "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
                 [
@@ -573,6 +632,11 @@ class BatchWriter(Store):
             )
             jobs, diverted = copies_of_rejected(conn, batch, jobs)
             conn.executemany(UPSERT_JOB, [job_params(job) for job in jobs])
+            if batch.source == "oracle_cloud":
+                conn.executemany(
+                    "INSERT OR IGNORE INTO oracle_full_details (id) VALUES (?)",
+                    [(job.id,) for job in jobs if job.id in fresh_oracle and job.description],
+                )
             quarantined, heirs = _reject(conn, batch, batch.quarantined + diverted, known, stamp)
             conn.execute(
                 f"DELETE FROM quarantine WHERE id IN {EACH}",
