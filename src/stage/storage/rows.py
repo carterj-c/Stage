@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from collections.abc import Sequence
 from datetime import datetime
@@ -75,6 +76,7 @@ JOB_COLUMNS = (
     "term",
     "role",
     "level",
+    "roles",
     "work_auth_flag",
     "degree_requirement",
     "compensation",
@@ -278,6 +280,7 @@ def job_from(row: sqlite3.Row) -> Job:
         term=row["term"],
         role=RoleCategory(row["role"]),
         level=JobLevel(row["level"]),
+        roles=tuple(RoleCategory(role) for role in json.loads(row["roles"])),
         work_auth_flag=bool(row["work_auth_flag"]),
         degree_requirement=DegreeRequirement(row["degree_requirement"]),
         compensation=row["compensation"],
@@ -311,6 +314,7 @@ def job_params(job: Job) -> tuple[Any, ...]:
         job.term,
         job.role.value,
         job.level.value,
+        json.dumps([role.value for role in job.roles]),
         int(job.work_auth_flag),
         job.degree_requirement.value,
         job.compensation,

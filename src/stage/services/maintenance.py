@@ -237,7 +237,8 @@ def _reclassifications(
     for job in jobs:
         place = listed_place(job.location_raw, job.apply_url_raw, job.title_raw)
         location = resolve_listing(place, job.title_raw)
-        title_role = classify_role(job.title_raw, job.description).role
+        verdict = classify_role(job.title_raw, job.description, job.signals.category)
+        title_role = verdict.role
         candidate = replace(
             job,
             company=shown_company(job.company),
@@ -246,6 +247,7 @@ def _reclassifications(
             location=location.bucket,
             remote_scope=location.remote_scope,
             role=title_role if title_role is not RoleCategory.UNKNOWN else job.role,
+            roles=verdict.roles,
             term=_current_term(job),
         )
         eligibility = resolve_eligibility(candidate)
@@ -285,6 +287,7 @@ async def _release_reclassified_quarantine(
         RejectionReason.OUT_OF_SCOPE_LOCATION,
         RejectionReason.NOT_AN_INTERNSHIP,
         RejectionReason.NOT_EARLY_CAREER,
+        RejectionReason.OUT_OF_SCOPE_DEGREE,
     ):
         if not remaining:
             break

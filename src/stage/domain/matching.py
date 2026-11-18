@@ -10,7 +10,7 @@ def location_agrees(left: LocationBucket, right: LocationBucket) -> bool:
     return left is right
 
 
-_TERMLESS_LEVELS = frozenset({JobLevel.NEW_GRAD, JobLevel.ENTRY})
+_TERMLESS_LEVELS = frozenset({JobLevel.NEW_GRAD, JobLevel.ENTRY, JobLevel.MID, JobLevel.SENIOR})
 
 
 def term_agrees(

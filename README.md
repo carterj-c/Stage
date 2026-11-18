@@ -450,3 +450,28 @@ entry. Add divisions only when their exact name unambiguously identifies the
 employer. Do not add ambiguous abbreviations or infer a subsidiary's classification
 from a parent name. New industry labels also need CLI/MCP choices and tests.
 Catalogue changes apply to already stored rows without a sync or database migration.
+
+### Broader occupations and levels
+
+Broader occupation search is available with `--level mid`, `--level senior`,
+`--level unknown`, or `--level all`; the default remains internships only.
+Roles include `project-management`, `program-management`, `production`, `finance`,
+`investment-research`, `investment-banking`, and `risk`, alongside existing roles.
+Occupation phrases and negative examples live in `data/lexicon/roles.yaml` inside
+Stage's package. New occupation phrases use titles, not employer industry.
+A neutral title such as Project Manager stays at unknown level. Explicit senior
+and intermediate/mid-level markers set seniority; numeric grades remain unknown
+when their meaning is ambiguous. Mixed occupation titles are stored and searchable
+under each matched role after screening or rescreening (all new occupation matches plus the existing primary
+specialty). Legacy-only mixed specialties still use their existing primary role.
+
+The new occupations and quant roles retain master/PhD requirements as metadata.
+Other roles keep their existing degree eligibility rules. Source acquisition is
+unchanged: broad ATS boards can provide these jobs, while curated internship feeds
+and Workday's early-career queries still constrain what is fetched.
+
+Upgrades rescreen stored postings and reconsider degree, role, and career-level
+quarantine rejections. Quarantine recovery uses stored title and source signals:
+older quarantine rows do not retain descriptions, so degree metadata and other
+body-only evidence require a later source refresh. Rescreening retains its existing
+100,000-posting cap (including quarantine candidates) and eight-pass limit.

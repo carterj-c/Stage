@@ -5,7 +5,6 @@
     "description": "Open the apply pages of up to 50 postings in the user's web browser, one tab each. Only plain http and https links open. Use only when the user asks to open them.",
     "inputSchema": {
       "type": "object",
-      "additionalProperties": false,
       "properties": {
         "ids": {
           "description": "Up to 50 posting ids whose apply pages to open",
@@ -23,7 +22,8 @@
       "required": [
         "ids"
       ],
-      "title": "open_postingsArguments"
+      "title": "open_postingsArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": false,
@@ -46,7 +46,6 @@
     "description": "Save the postings that match the same filters as search_postings to a new csv, md, json or pdf file in the user's Downloads folder, and return its path. It never replaces a file. Use only when the user asks for a file.",
     "inputSchema": {
       "type": "object",
-      "additionalProperties": false,
       "properties": {
         "file_type": {
           "default": "csv",
@@ -98,6 +97,13 @@
                 "infra",
                 "embedded",
                 "general-cs",
+                "project-management",
+                "program-management",
+                "production",
+                "finance",
+                "investment-research",
+                "investment-banking",
+                "risk",
                 "unknown"
               ],
               "type": "string"
@@ -117,6 +123,9 @@
                 "internship",
                 "new-grad",
                 "entry",
+                "mid",
+                "senior",
+                "unknown",
                 "all"
               ],
               "type": "string"
@@ -126,7 +135,7 @@
             }
           ],
           "default": null,
-          "description": "internship, new-grad, entry, or all. Internships only by default",
+          "description": "internship, new-grad, entry, mid, senior, unknown, or all. Internships only by default",
           "title": "Level"
         },
         "industries": {
@@ -227,7 +236,8 @@
           "title": "Days"
         }
       },
-      "title": "export_postingsArguments"
+      "title": "export_postingsArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": false,
@@ -250,9 +260,9 @@
     "description": "Start collecting new postings from the job boards in the background, like stage sync in a terminal. It takes several minutes and only one runs at a time. database_status shows its progress. Use only when the user asks for a sync.",
     "inputSchema": {
       "type": "object",
-      "additionalProperties": false,
       "properties": {},
-      "title": "start_syncArguments"
+      "title": "start_syncArguments",
+      "additionalProperties": false
     },
     "annotations": {
       "readOnlyHint": false,

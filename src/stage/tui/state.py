@@ -51,7 +51,7 @@ def filter_rows(
     ]
     for name, label, options in FILTER_FIELDS:
         for option in options:
-            if option == "unknown" and name != "industry":
+            if option == "unknown" and name not in ("industry", "level"):
                 continue
             rows.append((name, option, f"{label}: {option}", state.values.get(name) == option))
     window = state.window_days or 0

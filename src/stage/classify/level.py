@@ -129,8 +129,12 @@ def classify_early_career(title: str) -> LevelVerdict:
     senior = _longest_hit(f" {folded} ", lexicon.seniority)
     ranked, level_phrase = _numbered(title, lexicon)
     ranked = ranked or _closing_numeral(title, lexicon)
-    if senior or ranked:
-        return LevelVerdict(matched_phrase=senior or ranked)
+    if senior:
+        return LevelVerdict(JobLevel.SENIOR, senior)
+    if mid := _longest_hit(f" {folded} ", lexicon.mid):
+        return LevelVerdict(JobLevel.MID, mid)
+    if ranked:
+        return LevelVerdict(matched_phrase=ranked)
 
     scrubbed, blocked = _scrub(folded, lexicon.blocked)
     padded = f" {scrubbed} "

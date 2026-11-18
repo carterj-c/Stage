@@ -39,6 +39,13 @@ class RoleCategory(StrEnum):
     HARDWARE = "hardware"
     EMBEDDED = "embedded"
     GENERAL_CS = "general-cs"
+    PROJECT_MANAGEMENT = "project-management"
+    PROGRAM_MANAGEMENT = "program-management"
+    PRODUCTION = "production"
+    FINANCE = "finance"
+    INVESTMENT_RESEARCH = "investment-research"
+    INVESTMENT_BANKING = "investment-banking"
+    RISK = "risk"
     UNKNOWN = "unknown"
 
 
@@ -46,6 +53,8 @@ class JobLevel(StrEnum):
     INTERNSHIP = "internship"
     NEW_GRAD = "new-grad"
     ENTRY = "entry"
+    MID = "mid"
+    SENIOR = "senior"
     UNKNOWN = "unknown"
 
 
