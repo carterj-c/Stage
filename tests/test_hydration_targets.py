@@ -500,3 +500,22 @@ async def test_body_preserves_encoded_comparisons(content: str, expected: str) -
     async with client_for(httpx.Response(200, json=data)) as client:
         result = await fetch_target(target("greenhouse"), client)
     assert result is not None and result.description == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "same"),
+    [
+        ("https://boards.greenhouse.io/acme/jobs/123?utm_source=one", True),
+        ("https://job-boards.greenhouse.io/acme/jobs/123?utm_source=two", True),
+        ("https://boards.greenhouse.io/acme/jobs/124?utm_source=one", False),
+        ("https://employer.example/careers?utm_source=one", False),
+        ("https://boards.greenhouse.io.evil.example/acme/jobs/123", False),
+        ("https://user@boards.greenhouse.io/acme/jobs/123", False),
+    ],
+)
+def test_posting_identity_uses_strict_job_path(url: str, same: bool) -> None:
+    from stage.domain.hydration_target import posting_identity
+
+    expected = posting_identity("https://boards.greenhouse.io/acme/jobs/123")
+    assert expected is not None
+    assert (posting_identity(url) == expected) is same

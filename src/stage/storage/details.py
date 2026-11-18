@@ -12,6 +12,7 @@ from stage.domain import (
     WorkdayCrawl,
     WorkdayFacet,
 )
+from stage.domain.hydration_target import posting_identity
 from stage.domain.liveness import (
     AWAITING_PAGE,
     BOARD_SOURCES,
@@ -215,14 +216,25 @@ class DetailFetches(Store):
         )
 
     def feed_quarantined(
-        self, ids: Collection[str], source: str = "", urls: Collection[str] = ()
+        self, ids: Collection[str], source: str = "", identities: Collection[str] = ()
     ) -> list[QuarantinedJob]:
+        identity_set = set(identities)
+        if not identity_set:
+            rows = self._conn.execute(
+                f"SELECT * FROM quarantine WHERE id IN {EACH}", (listed(ids),)
+            )
+            return [quarantined_from(row) for row in rows]
         rows = self._conn.execute(
             f"SELECT * FROM quarantine WHERE id IN {EACH} OR "
-            f"(source = ? AND apply_url_raw IN {EACH} AND rejection_evidence <> '')",
-            (listed(ids), source, listed(urls)),
+            "(source = ? AND rejection_evidence <> '')",
+            (listed(ids), source),
         )
-        return [quarantined_from(row) for row in rows]
+        wanted = set(ids)
+        return [
+            entry
+            for entry in map(quarantined_from, rows)
+            if entry.id in wanted or posting_identity(entry.apply_url_raw) in identity_set
+        ]
 
     def feed_pending_ids(self, ids: Collection[str]) -> set[str]:
         rows = self._conn.execute(

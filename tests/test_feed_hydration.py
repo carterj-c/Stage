@@ -3107,7 +3107,7 @@ async def test_hanzili_new_matching_quarantine_during_screening_defers_feed(
         "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
         "| --- | --- | --- | --- | --- | --- | --- |\n"
         "| Software Engineer Intern | Acme | Hybrid position. | Company | Intern | "
-        "Toronto, ON | [Apply](https://boards.greenhouse.io/acme/jobs/123) |\n"
+        "Toronto, ON | [Apply](https://boards.greenhouse.io/acme/jobs/123?utm_source=new) |\n"
     )
     respx.get(feed.plan(NOW)[0]).respond(200, text=page, headers={"ETag": '"v1"'})
     respx.get(GH + "123").respond(503)
@@ -3127,7 +3127,7 @@ async def test_hanzili_new_matching_quarantine_during_screening_defers_feed(
                         "hanzili",
                         "Acme",
                         "Developer Intern",
-                        "https://boards.greenhouse.io/acme/jobs/123",
+                        "https://boards.greenhouse.io/acme/jobs/123?utm_source=old",
                         "out-of-scope-degree",
                         "PhD",
                         NOW.isoformat(),
@@ -3201,3 +3201,157 @@ async def test_hanzili_hydrated_rejection_follows_same_url_when_title_changes(
         assert len(entries) == 2
         assert all("PhD" in entry.rejection_evidence for entry in entries)
     assert detail.call_count == 1
+
+
+@respx.mock
+async def test_hanzili_tracking_query_variants_retain_same_posting_hold(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+
+    def page(query: str, summary: str) -> str:
+        return (
+            "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            f"| Software Engineer Intern | Acme | {summary} | Company | Intern | Toronto, ON | "
+            f"[Apply](https://boards.greenhouse.io/acme/jobs/123?{query}) |\n"
+        )
+
+    evidence = "Applicants must be enrolled in a PhD program."
+    respx.get(feed.plan(NOW)[0]).mock(
+        side_effect=[
+            httpx.Response(200, text=page("utm_source=first", evidence)),
+            httpx.Response(200, text=page("utm_source=second", "Hybrid position.")),
+        ]
+    )
+    detail = respx.get(GH + "123").respond(503)
+    async with open_repository(db_path) as repo:
+        for hours in (0, 6):
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [],
+                    sources=["hanzili"],
+                    now_fn=clock_at(NOW + timedelta(hours=hours)),
+                    close_orphans=False,
+                    still_open=False,
+                )
+            ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(entries) == 2
+        assert {entry.rejection_evidence for entry in entries} == {evidence}
+    assert detail.call_count == 0
+
+
+@respx.mock
+async def test_hanzili_neutral_quarantine_does_not_mask_matching_rejection(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    page = (
+        "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| Software Engineer Intern | Acme | Hybrid position. | Company | Intern | Toronto, ON | "
+        "[Apply](https://boards.greenhouse.io/acme/jobs/123?utm_source=new) |\n"
+    )
+    rows, _ = feed.rows(page)
+    incoming = feed._to_job(rows[0], NOW)
+    neutral = QuarantinedJob(
+        id=incoming.id,
+        source="hanzili",
+        company="Acme",
+        title_raw=incoming.title_raw,
+        reason=RejectionReason.UNKNOWN_CS_ROLE,
+        first_seen=NOW,
+        last_seen=NOW,
+        apply_url_raw=incoming.apply_url_raw,
+        location_raw=incoming.location_raw,
+    )
+    held = replace(
+        neutral,
+        id="hanzili:prior",
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase="PhD",
+        apply_url_raw="https://boards.greenhouse.io/acme/jobs/123?utm_source=old",
+        rejection_evidence="PhD required.",
+        feed_summary="PhD required.",
+    )
+    respx.get(feed.plan(NOW)[0]).respond(200, text=page)
+    respx.get(GH + "123").respond(503)
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                quarantined=(neutral, held),
+            )
+        )
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=clock_at(NOW + timedelta(hours=6)),
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        current = next(entry for entry in entries if entry.id == incoming.id)
+        assert current.rejection_evidence == "PhD required."
+        assert current.feed_summary == "Hybrid position."
+
+
+@respx.mock
+async def test_hanzili_shared_generic_careers_url_does_not_transfer_hold(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+
+    def page(title: str, summary: str) -> str:
+        return (
+            "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            f"| {title} | Acme | {summary} | Company | Intern | Toronto, ON | "
+            "[Apply](https://employer.example/careers) |\n"
+        )
+
+    respx.get(feed.plan(NOW)[0]).mock(
+        side_effect=[
+            httpx.Response(200, text=page("Software Engineer Intern", "PhD required.")),
+            httpx.Response(200, text=page("Software Developer Intern", "Hybrid position.")),
+        ]
+    )
+    async with open_repository(db_path) as repo:
+        for hours in (0, 6):
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [],
+                    sources=["hanzili"],
+                    now_fn=clock_at(NOW + timedelta(hours=hours)),
+                    close_orphans=False,
+                    still_open=False,
+                )
+            ]
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(entries) == 1 and entries[0].rejection_evidence == "PhD required."
+        jobs = await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        assert len(jobs) == 1 and jobs[0].title_raw == "Software Developer Intern"

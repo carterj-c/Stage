@@ -35,6 +35,7 @@ from stage.domain import (
     HttpValidator,
     Job,
     PlannedRequest,
+    QuarantinedJob,
     RateState,
     RejectionReason,
     RequestLogged,
@@ -65,6 +66,7 @@ from stage.domain import (
     rotate,
     turned_away,
 )
+from stage.domain.hydration_target import posting_identity
 from stage.domain.liveness import AWAITING_PAGE
 from stage.domain.text import counted, counts_locations, did_you_mean, plain_error
 from stage.domain.visits import FEED_PENDING_PREFIX
@@ -973,13 +975,17 @@ async def _persist_source_batch(
     incoming_full = {entry.id: entry.description for entry in collected}
     ids = [job.id for job in collected]
     feed_snapshot = await repository.feed_jobs(ids) if batch.feed_source and ids else []
-    quarantine_urls = (
-        tuple(entry.apply_url_raw for entry in collected if entry.apply_url_raw)
+    quarantine_identities = (
+        tuple(
+            identity
+            for entry in collected
+            if (identity := posting_identity(entry.apply_url_raw)) is not None
+        )
         if batch.feed_source and batch.source == "hanzili"
         else ()
     )
     feed_quarantine = (
-        await repository.feed_quarantined(ids, batch.source, quarantine_urls)
+        await repository.feed_quarantined(ids, batch.source, quarantine_identities)
         if batch.feed_source and ids
         else []
     )
@@ -1035,18 +1041,23 @@ async def _persist_source_batch(
         from stage.classify.scope import Rejection, to_quarantined
 
         previous = {entry.id: entry for entry in feed_quarantine}
-        previous_by_url = {
-            entry.apply_url_raw: entry
-            for entry in feed_quarantine
-            if entry.rejection_evidence and entry.apply_url_raw
-        }
+        previous_by_identity: dict[str, list[QuarantinedJob]] = {}
+        for held_entry in feed_quarantine:
+            identity = posting_identity(held_entry.apply_url_raw)
+            if held_entry.rejection_evidence and identity is not None:
+                previous_by_identity.setdefault(identity, []).append(held_entry)
         screened_by_id = {entry.id: entry for entry in screened}
         kept_by_id = {entry.id: entry for entry in kept}
         rejected_by_id = {entry.id: entry for entry in rejected}
         for ident, screened_job in screened_by_id.items():
             previous_rejection = previous.get(ident)
-            if previous_rejection is None and batch.source == "hanzili":
-                previous_rejection = previous_by_url.get(screened_job.apply_url_raw)
+            if batch.source == "hanzili" and (
+                previous_rejection is None or not previous_rejection.rejection_evidence
+            ):
+                identity = posting_identity(screened_job.apply_url_raw)
+                holds = previous_by_identity.get(identity, []) if identity is not None else []
+                if holds:
+                    previous_rejection = min(holds, key=lambda entry: entry.id)
             old_evidence = previous_rejection.rejection_evidence if previous_rejection else ""
             if (
                 not old_evidence
@@ -1153,7 +1164,7 @@ async def _persist_source_batch(
             rejection_screened=tuple(screened),
             feed_expected=tuple(feed_snapshot) if batch.feed_source else None,
             feed_quarantine_expected=tuple(feed_quarantine),
-            feed_quarantine_urls=quarantine_urls,
+            feed_quarantine_identities=quarantine_identities,
         )
     )
     if counts.successors:

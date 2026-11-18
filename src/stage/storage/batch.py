@@ -20,6 +20,7 @@ from stage.domain import (
     RoleCategory,
     board_of,
 )
+from stage.domain.hydration_target import posting_identity
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
 from stage.domain.text import is_workday_opening
 from stage.domain.visits import (
@@ -585,18 +586,21 @@ def _protect_screened_feed_rows(
     rejected_entries = {entry.id: entry for entry in batch.quarantined}
     accepted = {entry.id: entry for entry in batch.jobs}
     identities = [entry.id for entry in batch.jobs] + [entry.id for entry in batch.quarantined]
-    if batch.feed_quarantine_urls:
+    if batch.feed_quarantine_identities:
         rows = conn.execute(
-            f"SELECT * FROM quarantine WHERE source = ? AND apply_url_raw IN {EACH} "
-            "AND rejection_evidence <> ''",
-            (batch.source, listed(batch.feed_quarantine_urls)),
+            "SELECT * FROM quarantine WHERE source = ? AND rejection_evidence <> ''",
+            (batch.source,),
         )
-        current_url_holds = {entry.id: entry for entry in map(quarantined_from, rows)}
+        current_url_holds = {
+            entry.id: entry
+            for entry in map(quarantined_from, rows)
+            if posting_identity(entry.apply_url_raw) in batch.feed_quarantine_identities
+        }
         expected_url_holds = {
             entry.id: entry
             for entry in batch.feed_quarantine_expected
             if entry.source == batch.source
-            and entry.apply_url_raw in batch.feed_quarantine_urls
+            and posting_identity(entry.apply_url_raw) in batch.feed_quarantine_identities
             and entry.rejection_evidence
         }
         if current_url_holds != expected_url_holds:

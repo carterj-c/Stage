@@ -142,10 +142,10 @@ class AsyncRepository:
         return await self._writer.run(lambda repository: repository.detail_queue_size(source))
 
     async def feed_quarantined(
-        self, ids: Collection[str], source: str = "", urls: Collection[str] = ()
+        self, ids: Collection[str], source: str = "", identities: Collection[str] = ()
     ) -> list[QuarantinedJob]:
         return await self._writer.run(
-            lambda repository: repository.feed_quarantined(ids, source, urls)
+            lambda repository: repository.feed_quarantined(ids, source, identities)
         )
 
     async def feed_pending_ids(self, ids: Collection[str]) -> set[str]:

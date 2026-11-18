@@ -75,7 +75,7 @@ class SourceBatch:
     feed_full_source: bool = False
     feed_expected: tuple[Job, ...] | None = None
     feed_quarantine_expected: tuple[QuarantinedJob, ...] = ()
-    feed_quarantine_urls: tuple[str, ...] = ()
+    feed_quarantine_identities: tuple[str, ...] = ()
     pending_expected: tuple[QuarantinedJob, ...] = ()
     list_sources: frozenset[str] = frozenset()
     hydration_expected: tuple[Job, ...] | None = None
@@ -139,7 +139,7 @@ class Repository(Protocol):
         pass
 
     def feed_quarantined(
-        self, ids: Collection[str], source: str = "", urls: Collection[str] = ()
+        self, ids: Collection[str], source: str = "", identities: Collection[str] = ()
     ) -> list[QuarantinedJob]:
         pass
 
