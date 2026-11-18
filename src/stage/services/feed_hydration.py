@@ -145,6 +145,7 @@ async def hydrate_feeds(
                 detail_fetches=tuple(outcomes.get(source, [])),
                 rate_state=pending_states,
                 hydration_expected=tuple(originals.get(source, [])),
+                rejection_screened=tuple(collected.get(source, [])),
             )
         )
         pending_states = ()

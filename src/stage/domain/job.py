@@ -41,6 +41,7 @@ class Job:
     compensation: str | None = None
     source_posted_at: datetime | None = None
     duplicate_of: str | None = None
+    feed_summary: str = ""
 
     @property
     def board_key(self) -> str:

@@ -192,6 +192,8 @@ async def test_full_detail_is_rescreened_and_rejected_through_batch_writer(db_pa
         assert await repo.get_job(job().id) is None
         rejected = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
         assert len(rejected) == 1
+        assert rejected[0].verified_description == "Applicants must be enrolled in a PhD program."
+        assert rejected[0].feed_summary == ""
         assert rejected[0].first_seen == job().first_seen
         assert rejected[0].last_seen == job().last_seen
         assert sum(batch.quarantined for batch in result.batches) == 1
@@ -1285,3 +1287,306 @@ async def test_changed_summary_retries_after_concurrent_verified_body_update(
             assert current is not None and current.description == "Fresher verified body."
         else:
             assert current is None and rejection_marker(db_path) == (1, 0)
+
+
+@respx.mock
+@pytest.mark.parametrize("restriction", ["body", "summary"])
+async def test_distinct_summary_and_body_flags_survive_blank_refresh_and_rescreen(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restriction: str,
+) -> None:
+    from stage.services.maintenance import rescreen
+
+    body = "Must be a US citizen." if restriction == "body" else "Build software systems."
+    summary = "Must be a US citizen." if restriction == "summary" else "No travel required."
+    respx.get(FEED_URL).respond(200, json={})
+    route = respx.get(GH + "123").respond(200, json=payload(body=body))
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+
+        async def changed(self: Feed, client: object, now: datetime) -> FetchResult:
+            return FetchResult(jobs=(replace(job(), description=summary, last_seen=now),))
+
+        monkeypatch.setattr(Feed, "fetch", changed)
+        await sync(repo, NOW + timedelta(hours=6))
+        current = await repo.get_job(job().id)
+        assert current is not None
+        assert (current.description, current.feed_summary, current.work_auth_flag) == (
+            body,
+            summary,
+            True,
+        )
+
+        async def blank(self: Feed, client: object, now: datetime) -> FetchResult:
+            return FetchResult(jobs=(replace(job(), last_seen=now),))
+
+        monkeypatch.setattr(Feed, "fetch", blank)
+        await sync(repo, NOW + timedelta(hours=12))
+        await rescreen(repo, now=NOW + timedelta(hours=13))
+        current = await repo.get_job(job().id)
+        assert current is not None
+        assert (current.description, current.feed_summary, current.work_auth_flag) == (
+            body,
+            summary,
+            True,
+        )
+    async with open_repository(db_path) as reopened:
+        persisted = await reopened.get_job(job().id)
+        assert persisted is not None
+        assert (persisted.description, persisted.feed_summary, persisted.work_auth_flag) == (
+            body,
+            summary,
+            True,
+        )
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("restricted", ["body", "summary"])
+async def test_independent_text_screening_prevents_cross_text_phd_masking(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restricted: str,
+) -> None:
+    from stage.services.maintenance import rescreen
+
+    phd = "Applicants must be enrolled in a PhD program."
+    undergrad = "Open to undergraduate"
+    body = phd if restricted == "body" else undergrad
+    summary = phd if restricted == "summary" else undergrad
+    respx.get(FEED_URL).respond(200, json={})
+    route = respx.get(GH + "123").respond(200, json=payload(body=undergrad))
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        if restricted == "body":
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE jobs SET description = ? WHERE id = ?", (body, job().id))
+
+        async def changed(self: Feed, client: object, now: datetime) -> FetchResult:
+            return FetchResult(jobs=(replace(job(), description=summary, last_seen=now),))
+
+        monkeypatch.setattr(Feed, "fetch", changed)
+        await sync(repo, NOW + timedelta(hours=6))
+        assert await repo.get_job(job().id) is None
+        rejected = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+        assert len(rejected) == 1 and "phd" in rejected[0].matched_phrase
+        assert rejected[0].feed_summary == summary
+        assert rejected[0].verified_description == body
+        assert rejection_marker(db_path) == (1, 0)
+        await rescreen(repo, now=NOW + timedelta(hours=7))
+        await sync(repo, NOW + timedelta(hours=12))
+        assert await repo.get_job(job().id) is None
+        assert (await repo.list_quarantined(QuarantineFilters(source="test-feed")))[
+            0
+        ].feed_summary == summary
+    async with open_repository(db_path) as reopened:
+        persisted = await reopened.list_quarantined(QuarantineFilters(source="test-feed"))
+        assert len(persisted) == 1
+        assert (persisted[0].verified_description, persisted[0].feed_summary) == (body, summary)
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("decision", ["accepted", "rejected"])
+async def test_concurrent_summary_update_prevents_stale_screening_and_retries(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+) -> None:
+    from stage.http import HttpClient
+    from stage.services.screening import normalize_batch
+
+    requests: list[httpx.Request] = []
+
+    def feed_response(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={}, headers={"ETag": '"summary"'})
+
+    respx.get(FEED_URL).mock(side_effect=feed_response)
+    respx.get(GH + "123").respond(200, json=payload(body="Original verified body."))
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        summary = (
+            "Applicants must be enrolled in a PhD program."
+            if decision == "rejected"
+            else "Updated feed summary."
+        )
+
+        async def changed(self: Feed, client: object, now: datetime) -> FetchResult:
+            assert isinstance(client, HttpClient)
+            response = await client.get_json(FEED_URL)
+            if response.not_modified:
+                return FetchResult(not_modified=True)
+            return FetchResult(jobs=(replace(job(), description=summary, last_seen=now),))
+
+        changed_once = False
+
+        def racing(jobs: Sequence[Job]) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+            nonlocal changed_once
+            result = normalize_batch(jobs)
+            if not changed_once:
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute(
+                        "UPDATE jobs SET feed_summary = ? WHERE id = ?",
+                        (
+                            "Concurrent summary",
+                            job().id,
+                        ),
+                    )
+                changed_once = True
+            return result
+
+        monkeypatch.setattr(Feed, "fetch", changed)
+        monkeypatch.setattr("stage.services.screening.normalize_batch", racing)
+        events = await sync(repo, NOW + timedelta(hours=6))
+        current = await repo.get_job(job().id)
+        assert current is not None
+        assert (current.description, current.feed_summary) == (
+            "Original verified body.",
+            "Concurrent summary",
+        )
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "partial"
+        assert rejection_marker(db_path) is None
+        assert not await repo.load_validators("test-feed")
+        events = await sync(repo, NOW + timedelta(hours=6, minutes=1))
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "success"
+        assert "if-none-match" not in requests[-1].headers
+        current = await repo.get_job(job().id)
+        if decision == "accepted":
+            assert current is not None and current.description == "Original verified body."
+            assert current.feed_summary == summary
+        else:
+            assert current is None and rejection_marker(db_path) == (1, 0)
+            rejected = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+            assert len(rejected) == 1 and rejected[0].feed_summary == summary
+
+
+@respx.mock
+@pytest.mark.parametrize("restricted", ["body", "summary"])
+async def test_rescreen_independently_rejects_preexisting_phd_evidence(
+    db_path: Path,
+    restricted: str,
+) -> None:
+    from stage.services.maintenance import rescreen
+
+    phd = "Applicants must be enrolled in a PhD program."
+    undergrad = "Open to undergraduate"
+    respx.get(FEED_URL).respond(200, json={})
+    respx.get(GH + "123").respond(200, json=payload(body=undergrad))
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE jobs SET description = ?, feed_summary = ? WHERE id = ?",
+                (
+                    phd if restricted == "body" else undergrad,
+                    phd if restricted == "summary" else undergrad,
+                    job().id,
+                ),
+            )
+        result = await rescreen(repo, now=NOW + timedelta(hours=6))
+        assert result.quarantined == 1
+        assert await repo.get_job(job().id) is None
+        entries = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+        assert len(entries) == 1 and "phd" in entries[0].matched_phrase
+        assert entries[0].feed_summary == (phd if restricted == "summary" else undergrad)
+        assert entries[0].verified_description == (phd if restricted == "body" else undergrad)
+        assert rejection_marker(db_path) == (1, 0)
+        await sync(repo, NOW + timedelta(hours=12))
+        assert await repo.get_job(job().id) is None
+
+
+@respx.mock
+@pytest.mark.parametrize("change", ["reject_to_accept", "accept_to_reject"])
+async def test_rescreen_retries_when_summary_changes_during_classification(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    from stage.services import maintenance
+
+    phd = "Applicants must be enrolled in a PhD program."
+    eligible = "Must be a US citizen."
+    respx.get(FEED_URL).respond(200, json={})
+    respx.get(GH + "123").respond(200, json=payload(body="Build software systems."))
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE jobs SET feed_summary = ? WHERE id = ?",
+                (
+                    phd if change == "reject_to_accept" else eligible,
+                    job().id,
+                ),
+            )
+        classify = maintenance._reclassifications
+        changed = False
+
+        def racing(
+            jobs: Sequence[Job],
+        ) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+            nonlocal changed
+            result = classify(jobs)
+            if not changed:
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute(
+                        "UPDATE jobs SET feed_summary = ? WHERE id = ?",
+                        (
+                            eligible if change == "reject_to_accept" else phd,
+                            job().id,
+                        ),
+                    )
+                changed = True
+            return result
+
+        monkeypatch.setattr(maintenance, "_reclassifications", racing)
+        await maintenance.rescreen(repo, now=NOW + timedelta(hours=6))
+        current = await repo.get_job(job().id)
+        if change == "reject_to_accept":
+            assert current is not None and current.description == "Build software systems."
+            assert current.feed_summary == eligible and current.work_auth_flag
+            assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+            assert rejection_marker(db_path) is None
+        else:
+            assert current is None and rejection_marker(db_path) == (1, 0)
+            rejected = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+            assert len(rejected) == 1 and rejected[0].feed_summary == phd
+
+
+async def test_rescreen_does_not_count_held_durable_evidence_as_released(db_path: Path) -> None:
+    from stage.domain import DetailFetch, RejectionReason
+    from stage.services.maintenance import rescreen
+
+    held = QuarantinedJob(
+        id=job().id,
+        source="test-feed",
+        company="Acme",
+        title_raw=job().title_raw,
+        reason=RejectionReason.UNKNOWN_CS_ROLE,
+        matched_phrase="old rule",
+        first_seen=job().first_seen,
+        last_seen=job().last_seen,
+        apply_url_raw=job().apply_url_raw,
+        location_raw=job().location_raw,
+        verified_description="Build software systems.",
+        feed_summary="Must be a US citizen.",
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW,
+                quarantined=(held,),
+                detail_fetches=(DetailFetch(FEED_REJECTION_PREFIX + held.id, resolved=True),),
+            )
+        )
+        result = await rescreen(repo, now=NOW + timedelta(hours=1))
+        assert result.released == 0
+        assert await repo.get_job(held.id) is None
+        entries = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+        assert len(entries) == 1
+        assert (entries[0].verified_description, entries[0].feed_summary) == (
+            held.verified_description,
+            held.feed_summary,
+        )

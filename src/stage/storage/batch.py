@@ -495,6 +495,7 @@ def _protect_screened_feed_rows(
     verified: list[str] = []
     blocked: set[str] = set()
     rejected_ids = {entry.id for entry in batch.quarantined}
+    rejected_entries = {entry.id: entry for entry in batch.quarantined}
     accepted = {entry.id: entry for entry in batch.jobs}
     identities = [entry.id for entry in batch.jobs] + [entry.id for entry in batch.quarantined]
     for ident in identities:
@@ -514,15 +515,14 @@ def _protect_screened_feed_rows(
             or original != current
             or read is None
             or not read.description
+            or read.description != current.description
+            or (ident in rejected_ids and rejected_entries[ident].feed_summary != read.feed_summary)
             or (
-                ident in rejected_ids
-                and read.description != current.description
-                and not read.description.startswith(current.description + "\n\n")
-            )
-            or (
-                batch.feed_source
-                and ident in accepted
-                and accepted[ident].description != current.description
+                ident in accepted
+                and (
+                    accepted[ident].feed_summary != read.feed_summary
+                    or (batch.feed_source and accepted[ident].description != current.description)
+                )
             )
         ):
             blocked.add(ident)
@@ -578,6 +578,25 @@ class BatchWriter(Store):
         with self._transaction() as conn:
             batch = _hold_feed_rejections(conn, _guard_hydration(conn, batch))
             batch, verified_rejections, conflicts = _protect_screened_feed_rows(conn, batch)
+            verified = set(verified_rejections)
+            if batch.hydration_expected is not None:
+                verified.update(
+                    entry.id.removeprefix(FEED_DETAIL_PREFIX)
+                    for entry in batch.detail_fetches
+                    if entry.id.startswith(FEED_DETAIL_PREFIX)
+                    and entry.resolved
+                    and not entry.failed
+                )
+            evidence = {job.id: job.description for job in batch.rejection_screened}
+            batch = replace(
+                batch,
+                quarantined=tuple(
+                    replace(entry, verified_description=evidence[entry.id])
+                    if entry.id in verified and entry.id in evidence
+                    else entry
+                    for entry in batch.quarantined
+                ),
+            )
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
             known = _first_seen(seen, started)

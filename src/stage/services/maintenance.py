@@ -242,6 +242,7 @@ def _reclassifications(
         resolve_listing,
         shown_company,
     )
+    from stage.services.screening import combine_summary_evidence
 
     candidates: list[Job] = []
     rejected: list[QuarantinedJob] = []
@@ -274,6 +275,7 @@ def _reclassifications(
             or screen_degree_scope(candidate)
             or screen_is_cs_role(candidate)
         )
+        candidate, rejection = combine_summary_evidence(candidate, rejection)
         if rejection is not None:
             rejected.append(to_quarantined(candidate, rejection))
         candidates.append(candidate)
@@ -310,7 +312,8 @@ async def _release_reclassified_quarantine(
             title_raw=entry.title_raw,
             title_normalized=fold(entry.title_raw),
             apply_url_raw=entry.apply_url_raw,
-            description="",
+            description=entry.verified_description,
+            feed_summary=entry.feed_summary,
             first_seen=entry.first_seen,
             last_seen=entry.last_seen,
             location_raw=entry.location_raw,
@@ -333,8 +336,9 @@ async def _release_reclassified_quarantine(
         and (previous.reason, previous.matched_phrase) != (entry.reason, entry.matched_phrase)
     )
     relabelled = await repository.relabel_quarantine(sharpened)
+    released = 0
     for source in sorted({entry.source for entry in kept}):
-        await repository.apply_source_batch(
+        result = await repository.apply_source_batch(
             SourceBatch(
                 source=source,
                 run_started_at=moment,
@@ -342,4 +346,5 @@ async def _release_reclassified_quarantine(
                 resolve_duplicates=resolve_duplicates,
             )
         )
-    return len(kept), relabelled
+        released += result.added
+    return released, relabelled

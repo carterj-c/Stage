@@ -271,3 +271,62 @@ def test_a_hidden_file_beside_the_migrations_is_ignored(
     monkeypatch.setattr(migrations, "_MIGRATIONS_DIR", folder)
 
     assert [migration.name for migration in migrations.discover()] == expected
+
+
+def test_feed_summary_migration_preserves_existing_jobs_and_quarantine(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.storage import migrations
+
+    shipped = migrations.discover()
+    previous = tuple(entry for entry in shipped if entry.version < 3)
+    assert [entry.version for entry in previous] == [1, 2]
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: previous)
+        old = SqliteRepository.connect(db_path)
+        old._conn.execute(
+            "INSERT INTO jobs (id, source, company, title_raw, title_normalized, apply_url_raw, "
+            "description, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "feed:acme:1",
+                "feed",
+                "Acme",
+                "Intern",
+                "intern",
+                "https://example.com/1",
+                "Full original detail",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old._conn.execute(
+            "INSERT INTO quarantine (id, source, company, title_raw, reason, "
+            "first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "feed:acme:2",
+                "feed",
+                "Acme",
+                "Intern",
+                "out-of-scope-degree",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old.close()
+    upgraded = SqliteRepository.connect(db_path)
+    try:
+        job = upgraded.get_job("feed:acme:1")
+        assert (
+            job is not None and job.description == "Full original detail" and job.feed_summary == ""
+        )
+        summary = upgraded._conn.execute(
+            "SELECT feed_summary, verified_description FROM quarantine WHERE id = ?",
+            ("feed:acme:2",),
+        ).fetchone()
+        assert summary is not None and tuple(summary) == ("", "")
+        assert applied_versions(upgraded._conn) == (1, 2, 3)
+    finally:
+        upgraded.close()
+    assert len(_snapshots(db_path)) == 1

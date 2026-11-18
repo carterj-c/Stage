@@ -32,6 +32,8 @@ class QuarantinedJob:
     matched_phrase: str = ""
     employment_type: str = ""
     category: str = ""
+    feed_summary: str = ""
+    verified_description: str = ""
 
 
 @dataclass(frozen=True, slots=True)

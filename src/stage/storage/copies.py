@@ -73,6 +73,7 @@ def _rejected_copy(job: Job, origin: str, reason: str) -> QuarantinedJob:
         matched_phrase=f"{COPY_PREFIX}{origin}{_COPY_REASON}{reason}",
         employment_type=job.signals.employment_type,
         category=job.signals.category,
+        feed_summary=job.feed_summary,
     )
 
 
@@ -88,6 +89,7 @@ def as_job(entry: QuarantinedJob, duplicate_of: str | None = None) -> Job:
         apply_url_raw=entry.apply_url_raw,
         apply_url_canonical=canonical(entry.apply_url_raw),
         description="",
+        feed_summary=entry.feed_summary,
         first_seen=entry.first_seen,
         last_seen=entry.last_seen,
         location_raw=entry.location_raw,

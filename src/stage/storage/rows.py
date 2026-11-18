@@ -84,6 +84,7 @@ JOB_COLUMNS = (
     "first_seen",
     "last_seen",
     "source_posted_at",
+    "feed_summary",
     "duplicate_of",
 )
 UPSERT_JOB = upsert(
@@ -113,6 +114,8 @@ QUARANTINE_COLUMNS = (
     "last_seen",
     "employment_type",
     "category",
+    "feed_summary",
+    "verified_description",
 )
 UPSERT_QUARANTINE = upsert(
     "quarantine",
@@ -271,6 +274,7 @@ def job_from(row: sqlite3.Row) -> Job:
         apply_url_raw=row["apply_url_raw"],
         apply_url_canonical=row["apply_url_canonical"],
         description=row["description"],
+        feed_summary=row["feed_summary"],
         location_raw=row["location_raw"],
         location=location_bucket(row["location"]),
         remote_scope=_scope(row["remote_scope"]),
@@ -320,6 +324,7 @@ def job_params(job: Job) -> tuple[Any, ...]:
         to_text(job.first_seen),
         to_text(job.last_seen),
         to_text(job.source_posted_at) if job.source_posted_at else None,
+        job.feed_summary,
         job.duplicate_of,
     )
 
@@ -340,6 +345,8 @@ def quarantined_from(row: sqlite3.Row) -> QuarantinedJob:
         matched_phrase=row["matched_phrase"],
         employment_type=row["employment_type"],
         category=row["category"],
+        feed_summary=row["feed_summary"],
+        verified_description=row["verified_description"],
     )
 
 
@@ -359,6 +366,8 @@ def quarantined_params(entry: QuarantinedJob, first_seen: datetime) -> tuple[Any
         to_text(entry.last_seen),
         entry.employment_type,
         entry.category,
+        entry.feed_summary,
+        entry.verified_description,
     )
 
 

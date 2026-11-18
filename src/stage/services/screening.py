@@ -20,7 +20,8 @@ from stage.classify import (
     screen_location,
     to_quarantined,
 )
-from stage.domain import Job, QuarantinedJob
+from stage.classify.scope import Rejection
+from stage.domain import DegreeRequirement, Job, QuarantinedJob
 from stage.normalize import (
     canonical_apply_url,
     detect_language,
@@ -50,47 +51,78 @@ def _plausible(posted: datetime | None, seen: datetime) -> datetime | None:
     return posted if EARLIEST_POSTED <= posted <= latest else None
 
 
+_DEGREE_RANK = {
+    DegreeRequirement.UNKNOWN: 0,
+    DegreeRequirement.NONE: 0,
+    DegreeRequirement.BACHELORS: 1,
+    DegreeRequirement.MASTERS: 2,
+    DegreeRequirement.PHD: 3,
+}
+
+
+def _normalize_one(job: Job) -> tuple[Job, Rejection | None]:
+    job = replace(
+        job,
+        company=shown_company(job.company),
+        location_raw=listed_place(job.location_raw, job.apply_url_raw, job.title_raw),
+        source_posted_at=_plausible(job.source_posted_at, job.first_seen),
+    )
+    location = resolve_listing(job.location_raw, job.title_raw)
+    term = resolve_term(
+        title=job.title_raw,
+        description=job.description,
+        structured_terms=job.signals.terms,
+        structured_season=job.signals.season,
+        pivot_year=(job.source_posted_at or job.first_seen).year,
+        posted=job.source_posted_at or job.first_seen,
+    )
+    role = classify_role(job.title_raw, job.description, job.signals.category)
+    language = detect_language(job.title_raw, job.description)
+    eligibility = resolve_eligibility(job)
+    normalized = replace(
+        job,
+        apply_url_canonical=canonical_apply_url(job.apply_url_raw),
+        location=location.bucket,
+        remote_scope=location.remote_scope,
+        term=term.term,
+        role=role.role,
+        language=language.language,
+        degree_requirement=eligibility.degree_requirement,
+        work_auth_flag=eligibility.work_auth_flag,
+    )
+    level, rejection = resolve_level(normalized)
+    normalized = replace(normalized, level=level)
+    rejection = (
+        rejection
+        or screen_location(normalized)
+        or screen_degree_scope(normalized)
+        or screen_is_cs_role(normalized)
+    )
+    return normalized, rejection
+
+
+def combine_summary_evidence(job: Job, rejection: Rejection | None) -> tuple[Job, Rejection | None]:
+    if not job.feed_summary:
+        return job, rejection
+    summary, summary_rejection = _normalize_one(
+        replace(job, description=job.feed_summary, feed_summary="")
+    )
+    degree = job.degree_requirement
+    if _DEGREE_RANK[summary.degree_requirement] > _DEGREE_RANK[degree]:
+        degree = summary.degree_requirement
+    return replace(
+        job,
+        degree_requirement=degree,
+        work_auth_flag=job.work_auth_flag or summary.work_auth_flag,
+    ), rejection or summary_rejection
+
+
 def normalize_batch(jobs: Sequence[Job]) -> Screened:
     kept: list[Job] = []
     rejected: list[QuarantinedJob] = []
     for job in jobs:
-        job = replace(
-            job,
-            company=shown_company(job.company),
-            location_raw=listed_place(job.location_raw, job.apply_url_raw, job.title_raw),
-            source_posted_at=_plausible(job.source_posted_at, job.first_seen),
-        )
-        location = resolve_listing(job.location_raw, job.title_raw)
-        term = resolve_term(
-            title=job.title_raw,
-            description=job.description,
-            structured_terms=job.signals.terms,
-            structured_season=job.signals.season,
-            pivot_year=(job.source_posted_at or job.first_seen).year,
-            posted=job.source_posted_at or job.first_seen,
-        )
-        role = classify_role(job.title_raw, job.description, job.signals.category)
-        language = detect_language(job.title_raw, job.description)
-        eligibility = resolve_eligibility(job)
-        normalized = replace(
-            job,
-            apply_url_canonical=canonical_apply_url(job.apply_url_raw),
-            location=location.bucket,
-            remote_scope=location.remote_scope,
-            term=term.term,
-            role=role.role,
-            language=language.language,
-            degree_requirement=eligibility.degree_requirement,
-            work_auth_flag=eligibility.work_auth_flag,
-        )
-        level, rejection = resolve_level(normalized)
-        normalized = replace(normalized, level=level)
-        rejection = (
-            rejection
-            or screen_location(normalized)
-            or screen_degree_scope(normalized)
-            or screen_is_cs_role(normalized)
-        )
+        normalized, rejection = _normalize_one(job)
+        normalized, rejection = combine_summary_evidence(normalized, rejection)
         if rejection is None:
             kept.append(normalized)
         else:
