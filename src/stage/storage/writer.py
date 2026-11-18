@@ -117,9 +117,11 @@ class AsyncRepository:
         limit: int,
         boards: Collection[str] | None = None,
         ids: Collection[str] | None = None,
+        *,
+        now: datetime | None = None,
     ) -> list[str]:
         return await self._writer.run(
-            lambda repository: repository.detail_queue(source, limit, boards, ids)
+            lambda repository: repository.detail_queue(source, limit, boards, ids, now=now)
         )
 
     async def detail_queue_size(self, source: str) -> int:

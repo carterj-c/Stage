@@ -84,7 +84,7 @@ async def test_summary_full_detail_and_next_sync_preserve_and_rescreen(db_path: 
         await _persist_source_batch(
             repo, Screener(), SourceBatch(source=ADAPTER.name, run_started_at=NOW), summary.jobs
         )
-        assert await repo.detail_queue(ADAPTER.name, 20) == [_id()]
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == [_id()]
         full = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id()])
         assert full.authoritative and full.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
         assert detail.calls[0].request.url.params["finder"] == "ById;Id=91731,siteNumber=CX_1001"
@@ -102,7 +102,7 @@ async def test_summary_full_detail_and_next_sync_preserve_and_rescreen(db_path: 
             ),
             full.jobs,
         )
-        assert await repo.detail_queue(ADAPTER.name, 20) == []
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == []
         later = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(hours=2))
         await _persist_source_batch(
             repo,
@@ -138,7 +138,9 @@ async def test_classified_legacy_short_summary_is_eligible_and_failures_retry(
             SourceBatch(source=ADAPTER.name, run_started_at=NOW, jobs=jobs)
         )
         for attempt in range(3):
-            assert await repo.detail_queue(ADAPTER.name, 20) == [_id()]
+            assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == [
+                _id()
+            ]
             result = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id()])
             assert result.authoritative and result.detail_fetches == (
                 DetailFetch(id=_id(), failed=True),
@@ -150,7 +152,7 @@ async def test_classified_legacy_short_summary_is_eligible_and_failures_retry(
                     detail_fetches=result.detail_fetches,
                 )
             )
-        assert await repo.detail_queue(ADAPTER.name, 20) == []
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == []
         stored = await repo.get_job(_id())
         assert stored is not None and stored.description == ""
         assert stored.work_auth_flag is None
@@ -273,7 +275,7 @@ async def test_real_http_cap_defers_detail_without_spending_attempt(db_path: Pat
                 detail_fetches=result.detail_fetches,
             )
         )
-        assert await repo.detail_queue(ADAPTER.name, 20) == [_id()]
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == [_id()]
 
 
 @respx.mock
@@ -336,7 +338,12 @@ async def test_quarantined_known_role_needs_fresh_detail_to_reopen(
         assert await repo.get_job(_id()) is None
         (held,) = await repo.list_quarantined(QuarantineFilters(limit=None))
         assert held.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
-        assert await repo.detail_queue(ADAPTER.name, 20) == []
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == []
+        from stage.domain.visits import ORACLE_DETAIL_REFRESH_DAYS
+
+        assert await repo.detail_queue(
+            ADAPTER.name, 20, now=NOW + timedelta(days=ORACLE_DETAIL_REFRESH_DAYS)
+        ) == [_id()]
         listing = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(hours=1))
         kept, rejected = normalize_batch(listing.jobs)
         assert kept and not rejected  # Known-role exemption used to release this row.
@@ -388,10 +395,10 @@ async def test_rules_change_requeues_full_detail_and_failure_preserves_body(db_p
             ),
             full.jobs,
         )
-        assert await repo.detail_queue(ADAPTER.name, 20) == []
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == []
         await repo.mark_screened(0)
         await repo.mark_screened(1, at=NOW + timedelta(hours=1))
-        assert await repo.detail_queue(ADAPTER.name, 20) == [_id()]
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == [_id()]
         detail.respond(404)
         failure = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(hours=2), details=[_id()])
         assert failure.detail_fetches == (DetailFetch(id=_id(), failed=True),)
@@ -407,7 +414,7 @@ async def test_rules_change_requeues_full_detail_and_failure_preserves_body(db_p
         )
         stored = await repo.get_job(_id())
         assert stored is not None and stored.description == full.jobs[0].description
-        assert await repo.detail_queue(ADAPTER.name, 20) == [_id()]
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == [_id()]
         detail.respond(200, json=_detail(body="Updated complete content"))
         refreshed = await ADAPTER.fetch(COMPANY, client, NOW + timedelta(hours=3), details=[_id()])
         assert refreshed.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
@@ -423,7 +430,7 @@ async def test_rules_change_requeues_full_detail_and_failure_preserves_body(db_p
         )
         saved = await repo.get_job(_id())
         assert saved is not None and "Updated complete content" in saved.description
-        assert await repo.detail_queue(ADAPTER.name, 20) == []
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == []
 
 
 def test_migration_hides_unverified_summaries_and_preserves_proven_bodies(
@@ -482,7 +489,10 @@ def test_migration_hides_unverified_summaries_and_preserves_proven_bodies(
             _id(): "Legacy short summary",
             _id("91733"): "Unknown body after failed attempt",
         }
-        assert repo.detail_queue(ADAPTER.name, 20) == [_id(), _id("91733")]
+        assert repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(hours=4)) == [
+            _id(),
+            _id("91733"),
+        ]
         assert not repo._conn.execute(
             "SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH ?", ("legacy",)
         ).fetchall()
@@ -491,3 +501,182 @@ def test_migration_hides_unverified_summaries_and_preserves_proven_bodies(
         assert repo.stored_details([_id()])[_id()][0] == ""
         assert repo._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert migrations.migrate(repo._conn, db_path) == ()
+
+
+@pytest.mark.parametrize("field", ["CorporateDescriptionStr", "OrganizationDescriptionStr"])
+def test_boilerplate_alone_does_not_turn_summary_into_complete_body(field: str) -> None:
+    payload = {
+        "items": [
+            {
+                "Id": "91731",
+                "ExternalDescriptionStr": "Build systems",
+                field: "We are an equal opportunity employer.",
+            }
+        ]
+    }
+    assert _detail_body(payload, "91731", "<p>Build systems</p>") == ""
+    payload["items"][0]["ExternalQualificationsStr"] = "Must know Python"
+    body = _detail_body(payload, "91731", "Build systems")
+    assert "Must know Python" in body and "equal opportunity" in body
+
+
+@respx.mock
+async def test_periodic_refresh_is_bounded_rescreens_and_retries_after_exhaustion(
+    db_path: Path,
+) -> None:
+    from stage.domain.visits import ORACLE_DETAIL_REFRESH_DAYS
+
+    respx.get(ADAPTER.url_for(COMPANY)).respond(200, json=_listing(_posting(), _posting("91732")))
+    detail = respx.get(DETAIL_URL).mock(
+        side_effect=lambda req: httpx.Response(
+            200,
+            json=_detail(
+                req.url.params["finder"].split("Id=")[1].split(",")[0], "Original full description"
+            ),
+        )
+    )
+    expiry = NOW + timedelta(days=ORACLE_DETAIL_REFRESH_DAYS)
+    async with _client() as client, open_repository(db_path) as repo:
+        first = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id(), _id("91732")])
+        outcomes = tuple(x for x in first.detail_fetches if isinstance(x, DetailFetch))
+        assert len(outcomes) == 2
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(source=ADAPTER.name, run_started_at=NOW, detail_fetches=outcomes),
+            first.jobs,
+        )
+        assert await repo.detail_queue(ADAPTER.name, 20, now=expiry - timedelta(seconds=1)) == []
+        assert len(await repo.detail_queue(ADAPTER.name, 1, now=expiry)) == 1
+        assert set(await repo.detail_queue(ADAPTER.name, 20, now=expiry)) == {_id(), _id("91732")}
+        # Only the chosen queued ID consumes a detail request, and the updated body is screened.
+        detail.mock(
+            side_effect=lambda req: httpx.Response(
+                200,
+                json=_detail(
+                    req.url.params["finder"].split("Id=")[1].split(",")[0],
+                    "Updated job. Must be a US citizen.",
+                ),
+            )
+        )
+        updated = await ADAPTER.fetch(COMPANY, client, expiry, details=[_id()])
+        assert updated.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name, run_started_at=expiry, detail_fetches=updated.detail_fetches
+            ),
+            updated.jobs,
+        )
+        saved = await repo.get_job(_id())
+        assert (
+            saved is not None
+            and saved.work_auth_flag is True
+            and "Updated job" in saved.description
+        )
+        assert await repo.detail_queue(ADAPTER.name, 20, now=expiry) == [_id("91732")]
+        # Three failures stop immediate retries while retaining the old verified body.
+        detail.respond(404)
+        for attempt in range(3):
+            at = expiry + timedelta(hours=attempt + 1)
+            failed = await ADAPTER.fetch(COMPANY, client, at, details=[_id("91732")])
+            assert failed.detail_fetches == (DetailFetch(id=_id("91732"), failed=True),)
+            await _persist_source_batch(
+                repo,
+                Screener(),
+                SourceBatch(
+                    source=ADAPTER.name, run_started_at=at, detail_fetches=failed.detail_fetches
+                ),
+                failed.jobs,
+            )
+        end = expiry + timedelta(hours=3)
+        assert await repo.detail_queue(ADAPTER.name, 20, now=end) == []
+        retained = await repo.get_job(_id("91732"))
+        assert retained is not None and "Original full description" in retained.description
+        later = end + timedelta(days=ORACLE_DETAIL_REFRESH_DAYS)
+        assert _id("91732") in await repo.detail_queue(ADAPTER.name, 20, now=later)
+        # Another failed periodic attempt starts a fresh bounded retry cycle.
+        failed = await ADAPTER.fetch(COMPANY, client, later, details=[_id("91732")])
+        assert failed.detail_fetches == (DetailFetch(id=_id("91732"), failed=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name, run_started_at=later, detail_fetches=failed.detail_fetches
+            ),
+            failed.jobs,
+        )
+        assert _id("91732") in await repo.detail_queue(ADAPTER.name, 20, now=later)
+
+
+@pytest.mark.parametrize("baseline", [4, 5])
+@respx.mock
+async def test_migration_rearms_exhausted_unverified_reread_without_exposing_text(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, baseline: int
+) -> None:
+    from contextlib import closing
+
+    from stage.storage import migrations
+    from stage.storage.sqlite_repo import SqliteRepository
+
+    shipped = migrations.discover()
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: shipped[:4])
+        with closing(SqliteRepository.connect(db_path)) as repo:
+            repo._conn.execute(
+                "INSERT INTO jobs (id, source, company, title_raw, title_normalized, "
+                "apply_url_raw, description, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    _id(),
+                    ADAPTER.name,
+                    "Company",
+                    "Software Intern",
+                    "software intern",
+                    "https://example.com",
+                    "Possibly full former body",
+                    NOW.isoformat(),
+                    NOW.isoformat(),
+                ),
+            )
+            repo._conn.execute(
+                "INSERT INTO detail_fetches (id, source, fetched_at, resolved, failed, attempts) "
+                "VALUES (?, ?, ?, 0, 1, 3)",
+                (_id(), ADAPTER.name, NOW.isoformat()),
+            )
+        if baseline == 5:
+            patch.setattr(migrations, "discover", lambda: shipped[:5])
+            with closing(SqliteRepository.connect(db_path)) as repo:
+                prior = repo.get_job(_id())
+                assert prior is not None and prior.description == ""
+                assert repo.detail_queue(ADAPTER.name, 20, now=NOW) == []
+    respx.get(ADAPTER.url_for(COMPANY)).respond(200, json=_listing(_posting()))
+    respx.get(DETAIL_URL).respond(200, json=_detail(body="Recovered verified body"))
+    async with _client() as client, open_repository(db_path) as repo:
+        saved = await repo.get_job(_id())
+        assert saved is not None and saved.description == ""
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW) == [_id()]
+        result = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id()])
+        assert result.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name,
+                run_started_at=NOW + timedelta(minutes=1),
+                detail_fetches=result.detail_fetches,
+            ),
+            result.jobs,
+        )
+        restored = await repo.get_job(_id())
+        assert restored is not None and "Recovered verified body" in restored.description
+        assert await repo.detail_queue(ADAPTER.name, 20, now=NOW + timedelta(minutes=2)) == []
+    with closing(SqliteRepository.connect(db_path)) as repo:
+        assert (
+            repo._conn.execute(
+                "SELECT description FROM oracle_unverified_descriptions WHERE id = ?", (_id(),)
+            ).fetchone()[0]
+            == "Possibly full former body"
+        )
+        assert repo._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"

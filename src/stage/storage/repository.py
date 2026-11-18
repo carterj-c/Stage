@@ -109,6 +109,8 @@ class Repository(Protocol):
         limit: int,
         boards: Collection[str] | None = None,
         ids: Collection[str] | None = None,
+        *,
+        now: datetime | None = None,
     ) -> list[str]:
         pass
 

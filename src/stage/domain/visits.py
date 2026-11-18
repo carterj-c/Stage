@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+ORACLE_DETAIL_REFRESH_DAYS = 14
 REST_AFTER_FAILURES = 3
 REST_BASE_HOURS = 6
 REST_MAX_HOURS = 168

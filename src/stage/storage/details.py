@@ -1,6 +1,6 @@
 import json
 from collections.abc import Collection, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 
 from stage.domain import (
     UNKNOWN_TERM,
@@ -19,6 +19,7 @@ from stage.domain.liveness import (
     LivenessCheck,
 )
 from stage.domain.text import LOCATION_COUNT_GLOB
+from stage.domain.visits import ORACLE_DETAIL_REFRESH_DAYS
 from stage.storage.rows import (
     CLOSED,
     OPEN,
@@ -44,7 +45,9 @@ _QUEUED = (
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
     "OR (d.resolved = 1 AND d.attempts < ?) "
     "OR d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed'))) "
-    "OR (j.location_raw GLOB ? AND (d.id IS NULL OR d.attempts < ?)))"
+    "OR (j.location_raw GLOB ? AND (d.id IS NULL OR d.attempts < ?)) "
+    "OR (j.source = 'oracle_cloud' AND d.id IS NOT NULL "
+    f"AND julianday(d.fetched_at) <= julianday(?) - {ORACLE_DETAIL_REFRESH_DAYS}))"
 )
 
 
@@ -54,7 +57,9 @@ _AWAITING = (
     "(q.source IN ('workday', 'smartrecruiters', 'oracle_cloud') "
     "AND q.reason IN (?, ?, ?, ?, ?, ?))) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
-    "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)))"
+    "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)) "
+    "OR (q.source = 'oracle_cloud' "
+    f"AND julianday(d.fetched_at) <= julianday(?) - {ORACLE_DETAIL_REFRESH_DAYS}))"
 )
 _QUEUE = (
     f"SELECT j.id, 1 AS rank, j.first_seen {_QUEUED} "
@@ -62,7 +67,7 @@ _QUEUE = (
 )
 
 
-def _queued(source: str) -> tuple[object, ...]:
+def _queued(source: str, now: datetime) -> tuple[object, ...]:
     return (
         source,
         OPEN,
@@ -72,6 +77,7 @@ def _queued(source: str) -> tuple[object, ...]:
         REREAD_ATTEMPTS,
         LOCATION_COUNT_GLOB,
         REREAD_ATTEMPTS,
+        to_text(now),
         source,
         f"*{AWAITING_PAGE}",
         RejectionReason.OUT_OF_SCOPE_DEGREE.value,
@@ -82,6 +88,7 @@ def _queued(source: str) -> tuple[object, ...]:
         RejectionReason.OUT_OF_SCOPE_LOCATION.value,
         MAX_DETAIL_ATTEMPTS,
         "rules:changed",
+        to_text(now),
     )
 
 
@@ -92,6 +99,8 @@ class DetailFetches(Store):
         limit: int,
         boards: Collection[str] | None = None,
         ids: Collection[str] | None = None,
+        *,
+        now: datetime | None = None,
     ) -> list[str]:
         if limit <= 0 or (boards is not None and not boards) or (ids is not None and not ids):
             return []
@@ -122,12 +131,14 @@ class DetailFetches(Store):
             "CASE WHEN source_cursor IS NULL THEN rank ELSE 0 END, "
             "CASE WHEN source_cursor IS NULL OR board > stage_board_of(source_cursor, ?) "
             "THEN 0 ELSE 1 END, board LIMIT ?",
-            (source, *_queued(source), *params, source, source, limit),
+            (source, *_queued(source, now or datetime.now(UTC)), *params, source, source, limit),
         )
         return [str(row["id"]) for row in rows]
 
     def detail_queue_size(self, source: str) -> int:
-        return count(self._conn, f"SELECT COUNT(*) FROM ({_QUEUE})", _queued(source))
+        return count(
+            self._conn, f"SELECT COUNT(*) FROM ({_QUEUE})", _queued(source, datetime.now(UTC))
+        )
 
     def stored_details(self, ids: Collection[str]) -> dict[str, tuple[str, str]]:
         rows = self._conn.execute(

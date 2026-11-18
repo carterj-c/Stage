@@ -1107,7 +1107,10 @@ async def _plan_boards(
     }
     detail_budget = adapter.detail_budget
     detail_queue = await repository.detail_queue(
-        source, detail_budget, boards=[_safe_board_key(adapter, company) for company in ordered]
+        source,
+        detail_budget,
+        boards=[_safe_board_key(adapter, company) for company in ordered],
+        now=run_started_at,
     )
     if workday is not None:
         facets = await repository.load_workday_facets()

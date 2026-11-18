@@ -71,14 +71,12 @@ def _detail_body(payload: Any, identifier: str, summary: str) -> str:
     description = _text(row.ExternalDescriptionStr)
     if row.Id != identifier or not description:
         return ""
-    sections = [
+    core = [
         text
         for raw in (
             row.ExternalDescriptionStr,
             row.ExternalResponsibilitiesStr,
             row.ExternalQualificationsStr,
-            row.CorporateDescriptionStr,
-            row.OrganizationDescriptionStr,
         )
         if (text := _text(raw))
     ]
@@ -86,10 +84,19 @@ def _detail_body(payload: Any, identifier: str, summary: str) -> str:
         text.casefold() for raw in (summary, row.ShortDescriptionStr) if (text := _text(raw))
     ]
     if summaries and not any(
-        all(section.casefold() not in known for known in summaries) for section in sections
+        all(section.casefold() not in known for known in summaries) for section in core
     ):
         return ""
-    return "\n\n".join(sections)
+    return "\n\n".join(
+        [
+            *core,
+            *(
+                _text(raw)
+                for raw in (row.CorporateDescriptionStr, row.OrganizationDescriptionStr)
+                if raw
+            ),
+        ]
+    )
 
 
 class OraclePage(BaseModel):
