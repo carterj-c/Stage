@@ -287,6 +287,9 @@ class Repository(Protocol):
     def integrity_findings(self, *, whole_file: bool = False) -> list[IntegrityFinding]:
         pass
 
+    def description_coverage(self) -> dict[str, tuple[int, int]]:
+        pass
+
     def composition(self, column: str) -> dict[str, int]:
         pass
 

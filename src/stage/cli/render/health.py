@@ -581,6 +581,33 @@ def render_stats(
             )
         console.print(shown)
 
+    from stage.services.health import DESCRIPTION_COVERAGE_NOTE
+
+    console.print()
+    console.print("[bold]Description coverage (canonical postings)[/bold]")
+    coverage_table = table(
+        "source",
+        "rows",
+        "with desc",
+        "%",
+        right=("rows", "with desc", "%"),
+    )
+    listed_coverage = list(report.description_coverage.items())
+    shown_coverage = listed_coverage if limit is None else listed_coverage[:limit]
+    for source, coverage in shown_coverage:
+        coverage_table.add_row(
+            source,
+            f"{coverage.total_jobs:,}",
+            f"{coverage.with_description:,}",
+            f"{coverage.percentage:.1f}%",
+        )
+    if shown_coverage:
+        console.print(coverage_table)
+        more(console, len(listed_coverage) - len(shown_coverage))
+    else:
+        console.print("[dim]No canonical postings for description coverage.[/dim]")
+    console.print(f"[dim]{DESCRIPTION_COVERAGE_NOTE}[/dim]")
+
     for column, counts in report.composition.items():
         if not counts:
             continue

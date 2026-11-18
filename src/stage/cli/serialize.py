@@ -177,6 +177,8 @@ def sources_to_json(
 
 
 def stats_to_json(report: "StatsReport") -> str:
+    from stage.services.health import DESCRIPTION_COVERAGE_NOTE
+
     return dump(
         {
             "schema_version": report.schema_version,
@@ -186,6 +188,11 @@ def stats_to_json(report: "StatsReport") -> str:
             "cached_urls": report.cached_urls,
             "quarantined": report.quarantined,
             "composition": report.composition,
+            "description_coverage": {
+                source: {**asdict(coverage), "percentage": coverage.percentage}
+                for source, coverage in report.description_coverage.items()
+            },
+            "description_coverage_note": DESCRIPTION_COVERAGE_NOTE,
             "runs": [asdict(run) for run in report.runs],
         }
     )

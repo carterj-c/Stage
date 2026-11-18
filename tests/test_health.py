@@ -483,3 +483,80 @@ async def test_doctor_json_shows_stored_errors_without_class_names(db_path: Path
     assert "HttpStatusError" not in text and "; gone" not in text
     assert "boards-api.greenhouse.io returned 404, gone" in text
     assert json.loads(text)["healthy"] is True
+
+
+async def test_description_coverage_counts_only_canonical_jobs_by_source(db_path: Path) -> None:
+    import asyncio
+    import json
+    from dataclasses import replace
+
+    from typer.testing import CliRunner
+
+    from stage.cli.app import app
+    from stage.services.health import DescriptionCoverage
+
+    canonical = _job("greenhouse:acme:1", "greenhouse", "Acme")
+    jobs = (
+        replace(canonical, description="A short summary still counts as present."),
+        _job("greenhouse:acme:2", "greenhouse", "Acme"),
+        replace(_job("greenhouse:acme:3", "greenhouse", "Acme"), description=" \t\n\r"),
+        _job("workday:acme:4", "workday", "Acme"),
+        replace(
+            _job("lever:acme:5", "lever", "Acme"),
+            description="Closed posting text",
+            status=JobStatus.CLOSED,
+        ),
+        replace(
+            _job("greenhouse:acme:6", "greenhouse", "Acme"),
+            description="Duplicate text",
+            duplicate_of=canonical.id,
+        ),
+        replace(
+            _job("simplify:acme:7", "simplify", "Acme"),
+            description="Duplicate from another source",
+            duplicate_of=canonical.id,
+        ),
+    )
+    async with open_repository(db_path) as repository:
+        await repository.apply_source_batch(
+            SourceBatch(source="greenhouse", run_started_at=NOW, jobs=jobs)
+        )
+        report = await statistics(repository)
+
+    assert report.total_jobs == 5
+    assert report.description_coverage == {
+        "greenhouse": DescriptionCoverage(3, 1),
+        "lever": DescriptionCoverage(1, 1),
+        "workday": DescriptionCoverage(1, 0),
+    }
+    assert report.description_coverage["greenhouse"].percentage == pytest.approx(100 / 3)
+
+    result = await asyncio.to_thread(
+        CliRunner().invoke, app, ["stats", "--json", "--db", str(db_path)]
+    )
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.output)
+    assert parsed["description_coverage"] == {
+        "greenhouse": {
+            "total_jobs": 3,
+            "with_description": 1,
+            "percentage": pytest.approx(100 / 3),
+        },
+        "lever": {"total_jobs": 1, "with_description": 1, "percentage": 100.0},
+        "workday": {"total_jobs": 1, "with_description": 0, "percentage": 0.0},
+    }
+    assert "presence, not completeness" in parsed["description_coverage_note"]
+
+
+async def test_description_coverage_handles_an_empty_database(db_path: Path) -> None:
+    import json
+
+    from stage.cli.serialize import stats_to_json
+    from stage.services.health import DescriptionCoverage
+
+    async with open_repository(db_path) as repository:
+        report = await statistics(repository)
+
+    assert report.description_coverage == {}
+    assert json.loads(stats_to_json(report))["description_coverage"] == {}
+    assert DescriptionCoverage(0, 0).percentage == 0.0

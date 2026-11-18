@@ -325,6 +325,9 @@ class AsyncRepository:
             lambda repository: repository.integrity_findings(whole_file=whole_file)
         )
 
+    async def description_coverage(self) -> dict[str, tuple[int, int]]:
+        return await self._writer.run(lambda repository: repository.description_coverage())
+
     async def composition(self, column: str) -> dict[str, int]:
         return await self._writer.run(lambda repository: repository.composition(column))
 
