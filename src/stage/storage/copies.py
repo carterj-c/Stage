@@ -1,11 +1,9 @@
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Iterable, Sequence
 from functools import lru_cache
 
 from stage.domain import (
     Job,
-    JobLevel,
     QuarantinedJob,
     RejectionReason,
     SourceSignals,
@@ -13,7 +11,7 @@ from stage.domain import (
     source_rank,
 )
 from stage.storage.repository import Resolver, SourceBatch
-from stage.storage.rows import OPEN, UPSERT_JOB, job_from, job_params, quarantined_from
+from stage.storage.rows import OPEN, job_from, quarantined_from
 from stage.storage.sql import EACH, fold_company, listed
 
 COPY_PREFIX = "copy of "
@@ -214,23 +212,6 @@ def followers_of_rejected(
             if _main_copy(resolve, candidate, (probe,)) == main_id:
                 followers[candidate.id] = _rejected_copy(candidate, *_origin(main))
     return tuple(followers.values())
-
-
-def restore_copies(conn: sqlite3.Connection, accepted: Mapping[str, JobLevel]) -> None:
-    if not accepted:
-        return
-    rows = conn.execute(
-        "SELECT * FROM quarantine WHERE reason = ? AND matched_phrase GLOB ?", (_DEGREE, _COPY_GLOB)
-    )
-    back = [
-        replace(as_job(entry, origin), level=accepted[origin])
-        for entry in map(quarantined_from, rows)
-        if (origin := copied_from(entry.matched_phrase)[0]) in accepted
-    ]
-    if not back:
-        return
-    conn.executemany(UPSERT_JOB, [job_params(job) for job in back])
-    conn.execute(f"DELETE FROM quarantine WHERE id IN {EACH}", (listed(job.id for job in back),))
 
 
 def _degree_roots(conn: sqlite3.Connection) -> dict[str, QuarantinedJob]:

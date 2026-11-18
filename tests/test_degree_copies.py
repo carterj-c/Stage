@@ -117,16 +117,23 @@ def test_an_unrelated_list_posting_is_untouched(db_path: Path) -> None:
     repository.close()
 
 
-def test_a_later_accepted_board_copy_brings_the_list_copy_back(db_path: Path) -> None:
+def test_accepted_board_copy_does_not_reopen_list_copy_without_its_listing(db_path: Path) -> None:
     repository = _linked(db_path)
     later, latest = NOW + timedelta(hours=1), NOW + timedelta(hours=2)
     repository.apply_source_batch(_screened("greenhouse", [_board(DOCTORAL, later)], later))
-
     repository.apply_source_batch(_screened("greenhouse", [_board(OPEN_TO_ALL, latest)], latest))
     jobs, held = _state(repository)
+    assert COPY not in jobs and COPY in held
+    assert _board().id not in held
 
-    assert jobs[COPY] == _board().id, "the copy returns as a duplicate of the accepted board copy"
-    assert COPY not in held and _board().id not in held
+    fresh = latest + timedelta(hours=1)
+    listed = replace(_copy(fresh), description=OPEN_TO_ALL)
+    repository.apply_source_batch(_screened("simplify", [listed], fresh))
+    jobs, held = _state(repository)
+    assert jobs[COPY] == _board().id
+    assert COPY not in held
+    restored = repository.get_job(COPY)
+    assert restored is not None and restored.first_seen == NOW and restored.last_seen == fresh
     repository.close()
 
 
@@ -247,23 +254,71 @@ def test_a_list_copy_with_a_different_link_and_extra_words_is_still_found(
     repository.close()
 
 
-def test_restored_descriptionless_copy_keeps_unknown_authorization_after_promotion(
+def test_fresh_descriptionless_quant_copy_keeps_unknown_auth_after_promotion(
     db_path: Path,
 ) -> None:
-    repository = _linked(db_path)
-    later, latest = NOW + timedelta(hours=1), NOW + timedelta(hours=2)
-    repository.apply_source_batch(_screened("greenhouse", [_board(DOCTORAL, later)], later))
-    repository.apply_source_batch(_screened("greenhouse", [_board(OPEN_TO_ALL, latest)], latest))
+    from stage.classify.scope import Rejection, to_quarantined
+
+    repository = SqliteRepository.connect(db_path)
+    title = "Quantitative Research Intern"
+    main = replace(_board(OPEN_TO_ALL), title_raw=title, title_normalized=title.lower())
+    copy = _listed(COPY, title)
+    held = to_quarantined(
+        copy,
+        Rejection(
+            RejectionReason.OUT_OF_SCOPE_DEGREE, f"copy of {main.id} rejected for phd required"
+        ),
+    )
+    repository.apply_source_batch(_screened("greenhouse", [main]))
+    repository.apply_source_batch(
+        SourceBatch(source="simplify", run_started_at=NOW, quarantined=(held,))
+    )
+    observed = NOW + timedelta(hours=1)
+    repository.apply_source_batch(
+        _screened("simplify", [replace(copy, last_seen=observed)], observed)
+    )
     restored = repository.get_job(COPY)
-    assert restored is not None and restored.duplicate_of == _board().id
+    assert restored is not None and restored.duplicate_of == main.id
     assert restored.work_auth_flag is None
-    after = latest + timedelta(hours=1)
+    after = observed + timedelta(hours=1)
     repository.apply_source_batch(
         SourceBatch(source="greenhouse", run_started_at=after, closes_whole_source=True)
     )
     promoted = repository.get_job(COPY)
     assert promoted is not None and promoted.duplicate_of is None
     assert promoted.work_auth_flag is None
+    repository.close()
+
+
+def test_stale_quarantined_copy_stays_hidden_when_canonical_closes_until_fresh_listing(
+    db_path: Path,
+) -> None:
+    from stage.domain import JobStatus
+
+    repository = _linked(db_path)
+    rejected = NOW + timedelta(hours=1)
+    accepted = NOW + timedelta(days=20)
+    closed = NOW + timedelta(days=21)
+    observed = NOW + timedelta(days=22)
+    repository.apply_source_batch(_screened("greenhouse", [_board(DOCTORAL, rejected)], rejected))
+    repository.apply_source_batch(
+        _screened("greenhouse", [_board(OPEN_TO_ALL, accepted)], accepted)
+    )
+    assert repository.get_job(COPY) is None
+    repository.apply_source_batch(
+        SourceBatch(source="greenhouse", run_started_at=closed, closes_whole_source=True)
+    )
+    assert repository.get_job(COPY) is None
+    assert COPY in _state(repository)[1]
+    assert repository.get_job(_board().id).status is JobStatus.CLOSED  # type: ignore[union-attr]
+
+    fresh = replace(_copy(observed), description=OPEN_TO_ALL)
+    repository.apply_source_batch(_screened("simplify", [fresh], observed))
+    restored = repository.get_job(COPY)
+    assert restored is not None and restored.status is JobStatus.OPEN
+    assert restored.duplicate_of is None
+    assert restored.first_seen == NOW and restored.last_seen == observed
+    assert COPY not in _state(repository)[1]
     repository.close()
 
 

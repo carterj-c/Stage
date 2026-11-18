@@ -167,7 +167,6 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
                         run_started_at=moment,
                         jobs=tuple(entry for entry in updates if entry.source == source),
                         quarantined=tuple(entry for entry in rejected if entry.source == source),
-                        recover_copies=False,
                     )
                 )
                 if applied.successors:

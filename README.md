@@ -481,8 +481,9 @@ original descriptions, so they are not released by rescreen alone. Fresh listing
 without descriptions can release quant and the supported management and finance
 occupations, where graduate degrees are eligible. Rescreen can sharpen rejection
 reasons but does not establish whether a posting remains open, so it never releases
-quarantined postings without a fresh source listing. Degree and work authorization
-are reported as unknown until evidence is available. Other descriptionless roles
+quarantined postings without a fresh source listing. Each quarantined copy needs
+its own fresh listing; accepting a canonical posting does not reopen its stale copies.
+Degree and work authorization are reported as unknown until evidence is available. Other descriptionless roles
 remain quarantined until a fresh description is available.
 
 Workday and SmartRecruiters queue eligible quarantined postings for job pages,
