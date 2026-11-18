@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from stage.domain import Company, DetailFetch, Job, Platform, job_id
 from stage.http import HttpClient, HttpError
 from stage.sources import register
-from stage.sources._text import collapse_whitespace, strip_html
+from stage.sources._text import collapse_whitespace
 from stage.sources.base import (
     BoardAdapter,
     FetchResult,
@@ -146,7 +146,7 @@ def _description(text: str, url: str) -> str:
     for meta in body.select(":scope > h3, :scope > .jv-meta"):
         if meta.name != "h3" or meta.get_text(strip=True).casefold() == "description":
             meta.decompose()
-    return collapse_whitespace(strip_html(str(body)))
+    return collapse_whitespace(body.get_text(" ", strip=True))
 
 
 @register

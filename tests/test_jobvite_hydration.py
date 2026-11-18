@@ -73,6 +73,15 @@ async def test_saved_full_posting_keeps_all_duties_requirements_and_tail() -> No
 
 
 @respx.mock
+async def test_detail_preserves_encoded_comparisons() -> None:
+    detail = DETAIL.replace("Key Responsibilities", "GPA &gt; 3.0 &amp; experience &lt; 5 years", 1)
+    respx.get(URL).respond(200, text=detail)
+    result = await _fetch()
+    job = next(job for job in result.jobs if job.id == IDENT)
+    assert "GPA > 3.0 & experience < 5 years" in job.description
+
+
+@respx.mock
 @pytest.mark.parametrize("status", [403, 404, 410, 304])
 async def test_detail_http_failures_leave_listing_authoritative_and_retryable(status: int) -> None:
     respx.get(URL).respond(status)
