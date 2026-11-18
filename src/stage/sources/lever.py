@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
+from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field
 
 from stage.domain import Company, Job, Platform, SourceSignals, job_id
@@ -28,6 +29,13 @@ class LeverCategories(BaseModel):
         return self.location
 
 
+class LeverList(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    text: str = ""
+    content: str = ""
+
+
 class LeverPosting(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -39,6 +47,9 @@ class LeverPosting(BaseModel):
     categories: LeverCategories | None = None
     descriptionPlain: str = ""
     additionalPlain: str = ""
+    descriptionBodyPlain: str = ""
+    salaryDescriptionPlain: str = ""
+    lists: list[LeverList] = Field(default_factory=list)
 
 
 @register
@@ -57,7 +68,27 @@ class LeverAdapter(BoardAdapter):
 
     def to_job(self, company: Company, row: Any, now: datetime) -> Job:
         posted = datetime.fromtimestamp(row.createdAt / 1000, tz=UTC) if row.createdAt else None
-        parts = (row.descriptionPlain, row.additionalPlain)
+        sections = [
+            "\n".join(
+                part
+                for part in (
+                    f"### {section.text}" if section.text else "",
+                    BeautifulSoup(section.content, "html.parser").get_text("\n", strip=True),
+                )
+                if part
+            )
+            for section in row.lists
+        ]
+        parts: list[str] = []
+        for part in (
+            row.descriptionPlain,
+            row.descriptionBodyPlain,
+            *sections,
+            row.salaryDescriptionPlain,
+            row.additionalPlain,
+        ):
+            if part and not any(part in previous for previous in parts):
+                parts.append(part)
         return Job(
             id=job_id(self.name, company.slug, row.id),
             source=self.name,

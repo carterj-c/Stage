@@ -1106,6 +1106,9 @@ async def _plan_boards(
         company.registry_key: adapter.max_requests_per_company for company in ordered
     }
     detail_budget = adapter.detail_budget
+    detail_queue = await repository.detail_queue(
+        source, detail_budget, boards=[_safe_board_key(adapter, company) for company in ordered]
+    )
     if workday is not None:
         facets = await repository.load_workday_facets()
         full_states = await repository.full_reads(source, FULL_READ_PREFIX)
@@ -1125,6 +1128,7 @@ async def _plan_boards(
                 posture.max_requests_per_run,
                 full_reads=wanted,
                 glances=glances,
+                queued_details=len(detail_queue),
             )
             if ordered
             else ({}, 0)
@@ -1145,7 +1149,7 @@ async def _plan_boards(
         resting=resting,
         page_budgets=page_budgets,
         detail_budget=detail_budget,
-        detail_queue=await repository.detail_queue(source, detail_budget),
+        detail_queue=detail_queue[:detail_budget],
         facets=facets,
         crawls=crawls,
         full_states=full_states,

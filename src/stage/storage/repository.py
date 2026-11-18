@@ -102,7 +102,9 @@ class Repository(Protocol):
     def stale_members(self, source: str, before: datetime) -> list[SourceVisit]:
         pass
 
-    def detail_queue(self, source: str, limit: int) -> list[str]:
+    def detail_queue(
+        self, source: str, limit: int, boards: Collection[str] | None = None
+    ) -> list[str]:
         pass
 
     def detail_queue_size(self, source: str) -> int:
@@ -292,6 +294,9 @@ class Repository(Protocol):
         pass
 
     def integrity_findings(self, *, whole_file: bool = False) -> list[IntegrityFinding]:
+        pass
+
+    def description_coverage(self) -> dict[str, tuple[int, int]]:
         pass
 
     def composition(self, column: str) -> dict[str, int]:

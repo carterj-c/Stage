@@ -1,15 +1,17 @@
 import html
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, ClassVar, NamedTuple
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+import httpx
 from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel, ConfigDict
 
-from stage.domain import Company, Job, Platform, job_id
-from stage.http import HttpClient, HttpError
+from stage.domain import Company, DetailFetch, Job, Platform, job_id
+from stage.http import HttpClient, HttpError, RequestRefusedError
 from stage.sources import register
 from stage.sources._text import collapse_whitespace
 from stage.sources.base import (
@@ -110,6 +112,41 @@ def _whole(text: str) -> bool:
     return shown is None or int(shown[1]) >= int(shown[2])
 
 
+def _detail_url(company: Company, job: Job) -> str:
+    parts = urlsplit(job.apply_url_raw)
+    posting = parts.path.rstrip("/").rsplit("/", 1)[-1]
+    path = f"/{company.slug}/job/{posting}"
+    if (
+        parts.scheme != "https"
+        or parts.netloc != HOST
+        or parts.path != path
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", posting)
+    ):
+        return ""
+    return f"https://{HOST}{path}"
+
+
+def _description(text: str, url: str) -> str:
+    page = BeautifulSoup(text, "html.parser")
+    body = page.select_one("div.jv-job-detail-description")
+    bottom = page.select_one("div.jv-job-detail-bottom-actions")
+    if (
+        body is None
+        or bottom is None
+        or bottom in body.descendants
+        or body.find_next("div", class_="jv-job-detail-bottom-actions") is not bottom
+        or not any(
+            urljoin(url, str(link.get("href", ""))) == f"{url}/apply"
+            for link in bottom.select("a.jv-button-apply")
+        )
+    ):
+        return ""
+    for meta in body.select(":scope > h3, :scope > .jv-meta"):
+        if meta.name != "h3" or meta.get_text(strip=True).casefold() == "description":
+            meta.decompose()
+    return collapse_whitespace(body.get_text(" ", strip=True))
+
+
 @register
 class JobviteAdapter(BoardAdapter):
     name: ClassVar[str] = "jobvite"
@@ -117,8 +154,8 @@ class JobviteAdapter(BoardAdapter):
     rate_profile: ClassVar[str] = "moderate"
     bucket_key: ClassVar[str] = "jobvite"
     hosts: ClassVar[frozenset[str]] = frozenset({HOST})
-    detail_budget: ClassVar[int] = 0
-    max_requests_per_company: ClassVar[int] = 1 + MAX_SHOW_MORE
+    detail_budget: ClassVar[int] = 20
+    max_requests_per_company: ClassVar[int] = 1 + MAX_SHOW_MORE + detail_budget
 
     base_url: ClassVar[str] = BASE_URL
     row_model: ClassVar[type[BaseModel]] = JobviteRow
@@ -131,7 +168,14 @@ class JobviteAdapter(BoardAdapter):
         facets: object = None,
         details: Sequence[str] = (),
     ) -> FetchResult:
-        response = await client.get_text(self.url_for(company))
+        wanted = set(
+            list(
+                dict.fromkeys(
+                    ident for ident in details if ident.startswith(f"{self.board_key(company)}:")
+                )
+            )[: self.detail_budget]
+        )
+        response = await client.get_text(self.url_for(company), revalidate=bool(wanted))
         if response.not_modified:
             return FetchResult(not_modified=True)
         links = list(dict.fromkeys(map(html.unescape, _SHOW_MORE.findall(response.text))))
@@ -154,9 +198,41 @@ class JobviteAdapter(BoardAdapter):
         listed = list(page.rows)
         for text in hidden:
             listed.extend((await parse_page(read_page, text)).rows)
-        return self._result(
+        result = self._result(
             company, listed, now, truncated=not page.shown and not (complete and hidden)
         )
+
+        return await self._attach_descriptions(company, client, result, wanted)
+
+    async def _attach_descriptions(
+        self, company: Company, client: HttpClient, result: FetchResult, wanted: set[str]
+    ) -> FetchResult:
+        jobs: list[Job] = []
+        outcomes: list[DetailFetch] = []
+        bodies: dict[str, str] = {}
+        for job in result.jobs:
+            if job.id not in wanted:
+                jobs.append(job)
+                continue
+            if job.id in bodies:
+                jobs.append(replace(job, description=bodies[job.id]))
+                continue
+            url = _detail_url(company, job)
+            body = ""
+            if url:
+                try:
+                    response = await client.get_text(url, revalidate=True)
+                    if not response.not_modified:
+                        body = await parse_page(_description, response.text, url)
+                except RequestRefusedError:
+                    jobs.append(job)
+                    continue
+                except (HttpError, httpx.HTTPError):
+                    pass
+            bodies[job.id] = body
+            outcomes.append(DetailFetch(id=job.id, resolved=bool(body), failed=not bool(body)))
+            jobs.append(replace(job, description=body) if body else job)
+        return replace(result, jobs=tuple(jobs), detail_fetches=tuple(outcomes))
 
     async def _hidden(self, client: HttpClient, links: Sequence[str]) -> tuple[list[str], bool]:
         pages: list[str] = []

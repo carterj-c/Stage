@@ -48,7 +48,27 @@ def _posting(**overrides: object) -> dict[str, object]:
 async def test_fetch_maps_a_posting_with_its_full_description(
     acme_lever: Company, run_time: datetime
 ) -> None:
-    respx.get(ENDPOINT).mock(return_value=httpx.Response(200, json=[_posting()]))
+    respx.get(ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                _posting(
+                    descriptionBodyPlain="Research responsibilities.",
+                    salaryDescriptionPlain="Bonus eligibility.",
+                    lists=[
+                        {"text": "What You'll Do", "content": "<ul><li>Build models</li></ul>"},
+                        {
+                            "text": "What You'll Need",
+                            "content": (
+                                "<ul><li>Master's or PhD &amp; 2+ years</li>"
+                                "<li>GPA &gt; 3.0 &amp; experience &lt; 5 years</li></ul>"
+                            ),
+                        },
+                    ],
+                )
+            ],
+        )
+    )
     adapter = get_adapter("lever")
     async with _client() as client:
         result = await adapter.fetch(acme_lever, client, run_time)
@@ -57,6 +77,11 @@ async def test_fetch_maps_a_posting_with_its_full_description(
     assert job.title_raw == "Stagiaire en génie logiciel"
     assert "Duration: 4 months" in job.description
     assert "Opening and body text." in job.description
+    assert "Research responsibilities." in job.description
+    assert "Bonus eligibility." in job.description
+    assert "### What You'll Do\nBuild models" in job.description
+    assert "### What You'll Need\nMaster's or PhD & 2+ years" in job.description
+    assert "GPA > 3.0 & experience < 5 years" in job.description
     assert job.apply_url_raw == "https://jobs.lever.co/acme/abc-123"
 
 

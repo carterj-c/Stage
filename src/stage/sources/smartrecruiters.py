@@ -7,7 +7,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 from stage.domain import Company, DetailFetch, Job, Platform, board_key, job_id
-from stage.http import HttpClient, HttpError
+from stage.http import HttpClient, HttpError, RequestRefusedError
 from stage.sources import register
 from stage.sources._text import collapse_whitespace, strip_html
 from stage.sources.base import (
@@ -169,6 +169,9 @@ class SmartRecruitersAdapter:
             url = DETAIL_URL.format(slug=safe_slug(company.slug), posting=posting.id)
             try:
                 response = await client.get_json(url, revalidate=True)
+            except RequestRefusedError:
+                merged.append((posting, job))
+                continue
             except (HttpError, httpx.HTTPError):
                 outcomes.append(DetailFetch(id=job.id, resolved=False, failed=True))
                 merged.append((posting, job))

@@ -111,8 +111,12 @@ class AsyncRepository:
     async def stale_members(self, source: str, before: datetime) -> list[SourceVisit]:
         return await self._writer.run(lambda repository: repository.stale_members(source, before))
 
-    async def detail_queue(self, source: str, limit: int) -> list[str]:
-        return await self._writer.run(lambda repository: repository.detail_queue(source, limit))
+    async def detail_queue(
+        self, source: str, limit: int, boards: Collection[str] | None = None
+    ) -> list[str]:
+        return await self._writer.run(
+            lambda repository: repository.detail_queue(source, limit, boards)
+        )
 
     async def detail_queue_size(self, source: str) -> int:
         return await self._writer.run(lambda repository: repository.detail_queue_size(source))
@@ -334,6 +338,9 @@ class AsyncRepository:
         return await self._writer.run(
             lambda repository: repository.integrity_findings(whole_file=whole_file)
         )
+
+    async def description_coverage(self) -> dict[str, tuple[int, int]]:
+        return await self._writer.run(lambda repository: repository.description_coverage())
 
     async def composition(self, column: str) -> dict[str, int]:
         return await self._writer.run(lambda repository: repository.composition(column))
