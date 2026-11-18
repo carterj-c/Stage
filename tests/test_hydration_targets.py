@@ -1,5 +1,3 @@
-"""Public-shaped single-posting fixtures; no network requests to providers."""
-
 import json
 from dataclasses import replace
 from unittest.mock import AsyncMock
@@ -353,3 +351,25 @@ async def test_client_host_allowlist_cannot_be_bypassed() -> None:
         with pytest.raises(HostNotAllowedError):
             await fetch_target(target("greenhouse"), client)
         assert client.request_count == 0
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("<p>GPA &gt; 3.0 &amp; experience &lt; 5 years</p>", "GPA > 3.0 & experience < 5 years"),
+        ("<p>Use vector&lt;T&gt; and x &lt; y &gt; z</p>", "Use vector<T> and x < y > z"),
+        (
+            "&lt;p&gt;GPA &amp;gt; 3.0 and experience &amp;lt; 5 years&lt;/p&gt;",
+            "GPA > 3.0 and experience < 5 years",
+        ),
+        (
+            "<p>Requirements</p><script>evil()</script><style>.hidden{}</style><p>x &lt; 5</p>",
+            "Requirements\nx < 5",
+        ),
+    ],
+)
+async def test_body_preserves_encoded_comparisons(content: str, expected: str) -> None:
+    data = posting("greenhouse") | {"content": content}
+    async with client_for(httpx.Response(200, json=data)) as client:
+        result = await fetch_target(target("greenhouse"), client)
+    assert result is not None and result.description == expected

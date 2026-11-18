@@ -20,6 +20,7 @@ from stage.domain import (
 )
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
 from stage.domain.text import is_workday_opening
+from stage.domain.visits import FEED_DETAIL_PREFIX
 from stage.storage.copies import (
     copies_of_rejected,
     duplicate_candidates,
@@ -35,6 +36,7 @@ from stage.storage.rows import (
     UPSERT_DETAIL,
     UPSERT_FACET,
     UPSERT_JOB,
+    UPSERT_PUSHBACK,
     UPSERT_QUARANTINE,
     UPSERT_RATE_STATE,
     UPSERT_VALIDATOR,
@@ -389,7 +391,8 @@ def _record_reads(
             if not facet.pinned
         ],
     )
-    conn.executemany(UPSERT_RATE_STATE, [rate_state_params(state) for state in batch.rate_state])
+    rate_sql = UPSERT_RATE_STATE if batch.hydration_expected is None else UPSERT_PUSHBACK
+    conn.executemany(rate_sql, [rate_state_params(state) for state in batch.rate_state])
     conn.execute(f"DELETE FROM http_cache WHERE url IN {EACH}", (listed(held),))
     conn.executemany(
         UPSERT_VALIDATOR,
@@ -404,6 +407,26 @@ def _record_reads(
             for validator in batch.validators
             if validator.url not in held
         ],
+    )
+
+
+def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
+    if batch.hydration_expected is None:
+        return batch
+    allowed = set()
+    for expected in batch.hydration_expected:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (expected.id,)).fetchone()
+        if row is not None and job_from(row) == expected:
+            allowed.add(expected.id)
+    return replace(
+        batch,
+        jobs=tuple(job for job in batch.jobs if job.id in allowed),
+        quarantined=tuple(entry for entry in batch.quarantined if entry.id in allowed),
+        detail_fetches=tuple(
+            entry
+            for entry in batch.detail_fetches
+            if entry.id.removeprefix(FEED_DETAIL_PREFIX) in allowed
+        ),
     )
 
 
@@ -439,6 +462,7 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
+            batch = _guard_hydration(conn, batch)
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
             known = _first_seen(seen, started)
@@ -460,7 +484,8 @@ class BatchWriter(Store):
                 f"DELETE FROM quarantine WHERE id IN {EACH}",
                 (listed(job.id for job in jobs if seen.get(job.id, _UNSEEN).rejected is not None),),
             )
-            restore_copies(conn, {job.id: job.level for job in jobs})
+            if batch.hydration_expected is None:
+                restore_copies(conn, {job.id: job.level for job in jobs})
             _crawl(conn, batch, stamp)
             touched = _touch(conn, batch, stamp)
             closed, shut, held_urls = _close(conn, batch, stamp)

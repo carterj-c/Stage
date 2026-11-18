@@ -1534,6 +1534,34 @@ async def sync(
         async with aclosing(_merge(streams, ledger)) as merged:
             async for event in merged:
                 yield event
+        if not dry_run and feeds:
+            from stage.services.feed_hydration import hydrate_feeds
+
+            hydrated = await hydrate_feeds(
+                repository,
+                tuple(feeds),
+                ledger.screener,
+                now=now_fn(),
+                budgets=budgets,
+                postures=postures,
+                rng=shuffler,
+            )
+            for record in hydrated.requests:
+                yield record
+            _count_check_requests(ledger, hydrated.requests)
+            for counts in hydrated.batches:
+                index = next(
+                    (i for i, stat in enumerate(ledger.stats) if stat.source == counts.source), None
+                )
+                if index is None:
+                    ledger.stats.append(SourceRunStats(source=counts.source))
+                    index = len(ledger.stats) - 1
+                stat = ledger.stats[index]
+                ledger.stats[index] = replace(
+                    stat,
+                    updated=stat.updated + counts.updated,
+                    quarantined=stat.quarantined + counts.quarantined,
+                )
     finally:
         sys.setswitchinterval(switch)
         parse_pages_with(None)

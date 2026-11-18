@@ -73,6 +73,7 @@ class DetailFetch:
     failed: bool = False
 
 
+FEED_DETAIL_PREFIX = "feed-detail:"
 FULL_READ_PREFIX = "full:"
 SEARCH_PREFIX = "search:"
 FIRST_READ_PREFIX = "first:"

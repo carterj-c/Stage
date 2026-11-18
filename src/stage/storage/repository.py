@@ -69,6 +69,7 @@ class SourceBatch:
 
     closes_whole_source: bool = False
     list_sources: frozenset[str] = frozenset()
+    hydration_expected: tuple[Job, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +100,11 @@ class Repository(Protocol):
         pass
 
     def stale_members(self, source: str, before: datetime) -> list[SourceVisit]:
+        pass
+
+    def feed_hydration_queue(
+        self, sources: Collection[str], now: datetime, limit: int
+    ) -> list[Job]:
         pass
 
     def detail_queue(self, source: str, limit: int) -> list[str]:

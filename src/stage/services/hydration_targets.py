@@ -1,11 +1,4 @@
-"""Single-posting discovery-link hydration; no crawling or sync integration.
-
-Pass a caller-owned HttpClient configured with ``target.hosts`` (or HOSTS) and
-shared budgets. HTTP/budget failures propagate so callers can schedule retries.
-``complete`` means the endpoint's body contract was verified, not that the
-employer supplied every requirement. Never promote unverified text to full.
-"""
-
+import html
 import json
 import re
 from dataclasses import dataclass
@@ -18,7 +11,6 @@ from pydantic import ValidationError
 
 from stage.domain import Company, Platform
 from stage.http import HttpClient
-from stage.sources._text import strip_html
 from stage.sources.lever import LeverAdapter, LeverPosting
 
 HOSTS = frozenset(
@@ -53,12 +45,6 @@ class HydrationDetail:
 
 
 def target_for_url(url: object) -> HydrationTarget | None:
-    """Resolve only exact supported public job paths to fixed HTTPS targets.
-
-    Tracking query strings/fragments are discarded. Percent-encoded path tokens,
-    credentials, explicit ports (including 443), controls and backslashes fail
-    closed. Application paths are accepted only for Lever and Ashby.
-    """
     if not isinstance(url, str) or any(ord(c) <= 32 or ord(c) >= 127 for c in url):
         return None
     if "\\" in url:
@@ -114,7 +100,6 @@ def target_for_url(url: object) -> HydrationTarget | None:
 
 
 def _canonical(target: HydrationTarget) -> bool:
-    """Do not trust manually constructed targets as request destinations."""
     paths = {
         "greenhouse": f"https://boards.greenhouse.io/{target.account}/jobs/{target.posting_id}",
         "lever": f"https://jobs.lever.co/{target.account}/{target.posting_id}",
@@ -129,7 +114,14 @@ def _has_text(value: object) -> bool:
 
 
 def _body(value: object) -> str:
-    return strip_html(value) if isinstance(value, str) else ""
+    if not isinstance(value, str):
+        return ""
+    soup = BeautifulSoup(value, "html.parser")
+    if soup.find() is None and re.search(r"&lt;/?(?:p|div|h[1-6]|ul|ol|li|br)\b", value):
+        soup = BeautifulSoup(html.unescape(value), "html.parser")
+    for element in soup.find_all(["script", "style"]):
+        element.decompose()
+    return soup.get_text("\n", strip=True)
 
 
 def _json_nodes(value: Any) -> list[dict[str, Any]]:
@@ -160,7 +152,6 @@ def _ashby_detail(target: HydrationTarget, page: str) -> HydrationDetail | None:
             body = _body(node.get("description"))
             if body:
                 matches.append(body)
-    # Ambiguous structured data is not safe evidence of the requested body.
     if len(matches) != 1:
         return None
     return HydrationDetail(
@@ -197,7 +188,6 @@ def _json_detail(target: HydrationTarget, data: object) -> HydrationDetail | Non
         return None
     if not _has_text(data.get("text")):
         return None
-    # Validate raw lists before Pydantic can silently default a malformed section.
     if "lists" in data and (
         not isinstance(data["lists"], list)
         or any(
@@ -208,7 +198,6 @@ def _json_detail(target: HydrationTarget, data: object) -> HydrationDetail | Non
         )
     ):
         return None
-    # A different linked job is an error even when the top-level id matches.
     for key in ("hostedUrl", "applyUrl"):
         if data.get(key) and target_for_url(data[key]) != target:
             return None
@@ -238,11 +227,6 @@ async def fetch_target(
     target: HydrationTarget,
     client: HttpClient,
 ) -> HydrationDetail | None:
-    """Fetch one target using caller-owned security, pacing and shared budgets.
-
-    Invalid/error bodies return None; transport and HTTP failures propagate.
-    The caller must inspect ``complete`` before storing text as full detail.
-    """
     if not _canonical(target):
         return None
     if target.provider == "ashby":

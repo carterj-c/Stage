@@ -111,6 +111,13 @@ class AsyncRepository:
     async def stale_members(self, source: str, before: datetime) -> list[SourceVisit]:
         return await self._writer.run(lambda repository: repository.stale_members(source, before))
 
+    async def feed_hydration_queue(
+        self, sources: Collection[str], now: datetime, limit: int
+    ) -> list[Job]:
+        return await self._writer.run(
+            lambda repository: repository.feed_hydration_queue(sources, now, limit)
+        )
+
     async def detail_queue(self, source: str, limit: int) -> list[str]:
         return await self._writer.run(lambda repository: repository.detail_queue(source, limit))
 

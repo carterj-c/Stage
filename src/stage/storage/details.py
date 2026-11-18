@@ -1,6 +1,6 @@
 import json
 from collections.abc import Collection, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from stage.domain import UNKNOWN_TERM, Job, RateState, RoleCategory, WorkdayCrawl, WorkdayFacet
 from stage.domain.liveness import (
@@ -11,6 +11,7 @@ from stage.domain.liveness import (
     LivenessCheck,
 )
 from stage.domain.text import LOCATION_COUNT_GLOB
+from stage.domain.visits import FEED_DETAIL_PREFIX
 from stage.storage.rows import (
     CLOSED,
     OPEN,
@@ -62,6 +63,26 @@ def _queued(source: str) -> tuple[object, ...]:
 
 
 class DetailFetches(Store):
+    def feed_hydration_queue(
+        self, sources: Collection[str], now: datetime, limit: int
+    ) -> list[Job]:
+        rows = self._conn.execute(
+            "SELECT j.* FROM jobs j LEFT JOIN detail_fetches d ON d.id = ? || j.id "
+            f"WHERE j.source IN {EACH} AND j.status = ? AND j.description = '' "
+            "AND (d.id IS NULL OR (d.resolved = 0 AND d.attempts < ? "
+            "AND d.fetched_at <= ?)) "
+            "ORDER BY coalesce(d.attempts, 0), j.first_seen DESC, j.id LIMIT ?",
+            (
+                FEED_DETAIL_PREFIX,
+                listed(sources),
+                OPEN,
+                MAX_DETAIL_ATTEMPTS,
+                to_text(now - timedelta(hours=1)),
+                max(0, limit),
+            ),
+        )
+        return [job_from(row) for row in rows]
+
     def detail_queue(self, source: str, limit: int) -> list[str]:
         rows = self._conn.execute(
             f"SELECT id FROM ({_QUEUE}) ORDER BY rank, first_seen DESC LIMIT ?",

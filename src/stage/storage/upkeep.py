@@ -19,6 +19,7 @@ from stage.domain import (
     source_rank,
 )
 from stage.domain.liveness import CHECK_PREFIX
+from stage.domain.visits import FEED_DETAIL_PREFIX
 from stage.storage.rows import CLOSED, OPEN, UPSERT_DETAIL, UPSERT_HEIR, UPSERT_TOMBSTONE
 from stage.storage.sql import EACH, Store, count, from_text, listed, marks, starting, to_text
 
@@ -180,7 +181,14 @@ def _forget_checks(conn: sqlite3.Connection, leaving: Sequence[str]) -> None:
         "(SELECT 1 FROM jobs j WHERE j.id = substr(detail_fetches.id, ?))",
         (starting(CHECK_PREFIX), len(CHECK_PREFIX) + 1),
     )
+    conn.execute(
+        "DELETE FROM detail_fetches WHERE id GLOB ? AND NOT EXISTS "
+        "(SELECT 1 FROM jobs j WHERE j.id = substr(detail_fetches.id, ?)) "
+        "AND NOT EXISTS (SELECT 1 FROM quarantine q WHERE q.id = substr(detail_fetches.id, ?))",
+        (starting(FEED_DETAIL_PREFIX), len(FEED_DETAIL_PREFIX) + 1, len(FEED_DETAIL_PREFIX) + 1),
+    )
     kept = (
+        FEED_DETAIL_PREFIX,
         CHECK_PREFIX,
         HELD_CLOSE_PREFIX,
         FULL_READ_PREFIX,
