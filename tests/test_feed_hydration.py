@@ -1166,3 +1166,122 @@ async def test_conflicted_feed_batch_retries_without_validator_or_recent_success
             assert rejection_marker(db_path) == (1, 0)
         else:
             assert current is not None and current.description == "Newly hydrated full body"
+
+
+@respx.mock
+@pytest.mark.parametrize("decision", ["accepted", "rejected"])
+async def test_changed_feed_summary_is_screened_without_replacing_verified_body(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+) -> None:
+    respx.get(FEED_URL).respond(200, json={})
+    route = respx.get(GH + "123").respond(200, json=payload(body="Full verified job description."))
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        original = await repo.get_job(job().id)
+        assert original is not None and original.description == "Full verified job description."
+        summary = (
+            "Applicants must be enrolled in a PhD program."
+            if decision == "rejected"
+            else "A short feed summary."
+        )
+
+        async def changed(self: Feed, client: object, now: datetime) -> FetchResult:
+            return FetchResult(
+                jobs=(
+                    replace(
+                        job(),
+                        title_raw="Software Developer Intern",
+                        description=summary,
+                        first_seen=now,
+                        last_seen=now,
+                    ),
+                )
+            )
+
+        monkeypatch.setattr(Feed, "fetch", changed)
+        events = await sync(repo, NOW + timedelta(hours=6))
+        assert isinstance(events[-1], SyncFinished)
+        assert events[-1].outcome.value == "success"
+        stored = await repo.get_job(job().id)
+        if decision == "accepted":
+            assert stored is not None
+            assert stored.description == original.description
+            assert stored.title_raw == "Software Developer Intern"
+            assert rejection_marker(db_path) is None
+        else:
+            assert stored is None
+            entries = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+            assert len(entries) == 1 and "phd" in entries[0].matched_phrase
+            assert rejection_marker(db_path) == (1, 0)
+            await sync(repo, NOW + timedelta(hours=12))
+            assert await repo.get_job(job().id) is None
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("decision", ["accepted", "rejected"])
+async def test_changed_summary_retries_after_concurrent_verified_body_update(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+) -> None:
+    from stage.http import HttpClient
+    from stage.services.screening import normalize_batch
+
+    requests: list[httpx.Request] = []
+
+    def feed_response(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={}, headers={"ETag": '"changed"'})
+
+    respx.get(FEED_URL).mock(side_effect=feed_response)
+    respx.get(GH + "123").respond(200, json=payload(body="Original verified body."))
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        summary = (
+            "Applicants must be enrolled in a PhD program."
+            if decision == "rejected"
+            else "Updated summary."
+        )
+
+        async def changed(self: Feed, client: object, now: datetime) -> FetchResult:
+            assert isinstance(client, HttpClient)
+            response = await client.get_json(FEED_URL)
+            if response.not_modified:
+                return FetchResult(not_modified=True)
+            return FetchResult(jobs=(replace(job(), description=summary, last_seen=now),))
+
+        changed_once = False
+
+        def concurrent_screen(
+            jobs: Sequence[Job],
+        ) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+            nonlocal changed_once
+            result = normalize_batch(jobs)
+            if not changed_once:
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute(
+                        "UPDATE jobs SET description = ? WHERE id = ?",
+                        ("Fresher verified body.", job().id),
+                    )
+                changed_once = True
+            return result
+
+        monkeypatch.setattr(Feed, "fetch", changed)
+        monkeypatch.setattr("stage.services.screening.normalize_batch", concurrent_screen)
+        events = await sync(repo, NOW + timedelta(hours=6))
+        current = await repo.get_job(job().id)
+        assert current is not None and current.description == "Fresher verified body."
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "partial"
+        assert rejection_marker(db_path) is None
+        assert not await repo.load_validators("test-feed")
+        events = await sync(repo, NOW + timedelta(hours=6, minutes=1))
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "success"
+        assert "if-none-match" not in requests[-1].headers
+        current = await repo.get_job(job().id)
+        if decision == "accepted":
+            assert current is not None and current.description == "Fresher verified body."
+        else:
+            assert current is None and rejection_marker(db_path) == (1, 0)

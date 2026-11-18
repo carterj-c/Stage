@@ -495,6 +495,7 @@ def _protect_screened_feed_rows(
     verified: list[str] = []
     blocked: set[str] = set()
     rejected_ids = {entry.id for entry in batch.quarantined}
+    accepted = {entry.id: entry for entry in batch.jobs}
     identities = [entry.id for entry in batch.jobs] + [entry.id for entry in batch.quarantined]
     for ident in identities:
         row = conn.execute(
@@ -513,7 +514,16 @@ def _protect_screened_feed_rows(
             or original != current
             or read is None
             or not read.description
-            or (ident in rejected_ids and read.description != current.description)
+            or (
+                ident in rejected_ids
+                and read.description != current.description
+                and not read.description.startswith(current.description + "\n\n")
+            )
+            or (
+                batch.feed_source
+                and ident in accepted
+                and accepted[ident].description != current.description
+            )
         ):
             blocked.add(ident)
         elif ident in rejected_ids:

@@ -971,7 +971,27 @@ async def _persist_source_batch(
         await repository.verified_feed_jobs([job.id for job in collected]) if collected else []
     )
     screened = await _with_stored_details(repository, collected)
+    verified = {entry.id: entry.description for entry in expected} if batch.feed_source else {}
+    if verified:
+        screened = tuple(
+            replace(
+                entry,
+                description=(
+                    full + "\n\n" + entry.description
+                    if entry.description and entry.description not in full
+                    else full
+                ),
+            )
+            if (full := verified.get(entry.id))
+            else entry
+            for entry in screened
+        )
     kept, rejected = await screener(screened)
+    if verified:
+        kept = tuple(
+            replace(entry, description=verified[entry.id]) if entry.id in verified else entry
+            for entry in kept
+        )
     normalize_ms = _since(normalize_clock)
     write_clock = time.perf_counter()
     counts = await repository.apply_source_batch(
