@@ -3757,3 +3757,154 @@ async def test_same_batch_rejections_keep_each_postings_own_evidence(db_path: Pa
         assert {entry.id: entry.rejection_evidence for entry in entries} == dict(
             zip((first.id, second.id), bodies, strict=True)
         )
+
+
+@pytest.mark.parametrize("reject_first", [True, False])
+async def test_active_hydration_and_matching_rejection_are_held_in_either_order(
+    db_path: Path, reject_first: bool
+) -> None:
+    from stage.domain import CompanyVisit, DetailFetch, RejectionReason
+    from stage.domain.visits import FEED_PENDING_PREFIX
+    from stage.storage.copies import as_job
+
+    active = replace(
+        job(),
+        id="hanzili:active",
+        source="hanzili",
+        description="Old unverified listing",
+        feed_summary="Hybrid position",
+        first_seen=NOW,
+        last_seen=NOW,
+        apply_url_raw="https://boards.greenhouse.io/acme/jobs/123?utm_source=active",
+    )
+    pending = QuarantinedJob(
+        id="hanzili:pending",
+        source="hanzili",
+        company="Acme",
+        title_raw="Systems Engineer Intern",
+        reason=RejectionReason.UNKNOWN_CS_ROLE,
+        matched_phrase="systems engineer, waiting for its job page",
+        first_seen=NOW,
+        last_seen=NOW,
+        apply_url_raw="https://job-boards.greenhouse.io/acme/jobs/123?utm_source=pending",
+        feed_summary="Hybrid position",
+    )
+    accepted = replace(active, description="Develop backend software systems.")
+    phd = "Applicants must be enrolled in a PhD program."
+    rejected_input = replace(as_job(pending), description=phd)
+    rejected = replace(pending, reason=RejectionReason.OUT_OF_SCOPE_DEGREE, matched_phrase="PhD")
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                jobs=(active,),
+                quarantined=(pending,),
+                detail_fetches=(DetailFetch(FEED_PENDING_PREFIX + pending.id, resolved=True),),
+                visits=(CompanyVisit(board="hanzili", succeeded=True),),
+            )
+        )
+
+        async def accept() -> None:
+            await repo.apply_source_batch(
+                SourceBatch(
+                    source="hanzili",
+                    run_started_at=NOW,
+                    jobs=(accepted,),
+                    hydration_expected=(active,),
+                    rejection_screened=(accepted,),
+                    detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + active.id, resolved=True),),
+                )
+            )
+
+        async def reject() -> None:
+            await repo.apply_source_batch(
+                SourceBatch(
+                    source="hanzili",
+                    run_started_at=NOW,
+                    quarantined=(rejected,),
+                    hydration_expected=(),
+                    pending_expected=(pending,),
+                    rejection_screened=(rejected_input,),
+                    detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + pending.id, resolved=True),),
+                )
+            )
+
+        if reject_first:
+            await reject()
+            await accept()
+        else:
+            await accept()
+            await reject()
+        assert await repo.get_job(active.id) is None
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(entries) == 2
+        held = next(entry for entry in entries if entry.id == active.id)
+        assert held.rejection_evidence == phd and held.feed_summary == "Hybrid position"
+        if reject_first:
+            assert held.unverified_description == "Old unverified listing"
+            assert held.verified_description == ""
+        else:
+            assert held.verified_description == accepted.description
+        assert any(entry.id == pending.id and entry.rejection_evidence == phd for entry in entries)
+        from stage.services.maintenance import rescreen
+
+        await rescreen(repo, now=NOW + timedelta(hours=1))
+        await repo.purge(NOW + timedelta(days=101))
+        persisted = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(persisted) == 2
+        if reject_first:
+            assert next(
+                entry for entry in persisted if entry.id == active.id
+            ).unverified_description == ("Old unverified listing")
+
+
+@respx.mock
+@pytest.mark.parametrize("generic", [False, True])
+async def test_new_same_feed_rows_share_only_verified_posting_rejections(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, generic: bool
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    url = (
+        "https://employer.example/careers"
+        if generic
+        else "https://boards.greenhouse.io/acme/jobs/123"
+    )
+    page = (
+        "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| Software Engineer Intern | Acme | Hybrid position. | Company | Intern | Toronto, ON | "
+        f"[Apply]({url}?utm_source=a) |\n"
+        "| Software Engineer Intern | Acme | PhD required. | Company | Intern | New York, NY | "
+        f"[Apply]({url}?utm_source=b) |\n"
+    )
+    respx.get(feed.plan(NOW)[0]).respond(200, text=page)
+    detail = respx.get(GH + "123").respond(503)
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=clock_at(NOW),
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        jobs = await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        if generic:
+            assert len(jobs) == 1 and len(entries) == 1
+        else:
+            assert not jobs and len(entries) == 2
+            assert all(entry.rejection_evidence == "PhD required." for entry in entries)
+            assert {entry.feed_summary for entry in entries} == {
+                "Hybrid position.",
+                "PhD required.",
+            }
+            assert detail.call_count == 0

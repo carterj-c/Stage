@@ -127,6 +127,7 @@ QUARANTINE_COLUMNS = (
     "feed_summary",
     "verified_description",
     "rejection_evidence",
+    "unverified_description",
 )
 UPSERT_QUARANTINE = upsert(
     "quarantine",
@@ -140,6 +141,9 @@ UPSERT_QUARANTINE = upsert(
             else "verified_description = coalesce(nullif(excluded.verified_description, ''), "
             "quarantine.verified_description)"
             if column == "verified_description"
+            else "unverified_description = coalesce(nullif(excluded.unverified_description, ''), "
+            "quarantine.unverified_description)"
+            if column == "unverified_description"
             else f"{column} = excluded.{column}"
         )
         for column in QUARANTINE_COLUMNS[1:]
@@ -388,6 +392,7 @@ def quarantined_from(row: sqlite3.Row) -> QuarantinedJob:
         feed_summary=row["feed_summary"],
         verified_description=row["verified_description"],
         rejection_evidence=row["rejection_evidence"],
+        unverified_description=row["unverified_description"],
     )
 
 
@@ -410,6 +415,7 @@ def quarantined_params(entry: QuarantinedJob, first_seen: datetime) -> tuple[Any
         entry.feed_summary,
         entry.verified_description,
         entry.rejection_evidence,
+        entry.unverified_description,
     )
 
 

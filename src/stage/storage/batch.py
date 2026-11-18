@@ -559,9 +559,8 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
         ).fetchone()
         if row is not None and quarantined_from(row) == expected_pending:
             allowed.add(expected_pending.id)
-    pending_ids = {entry.id for entry in batch.pending_expected} & allowed
-    blocked_pending: set[str] = set()
-    if batch.source == "hanzili" and pending_ids:
+    blocked_hydration: set[str] = set()
+    if batch.source == "hanzili" and allowed:
         rows = conn.execute(
             "SELECT q.* FROM quarantine q WHERE q.source = 'hanzili' "
             f"AND (q.rejection_evidence <> '' OR {verified_feed_hold('q')})",
@@ -584,20 +583,20 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
             and entry.id in complete
             and (identity := posting_identity(entry.apply_url_raw)) is not None
         )
-        blocked_pending = {
+        blocked_hydration = {
             entry.id
             for entry in batch.jobs
-            if entry.id in pending_ids
+            if entry.id in allowed
             and (identity := posting_identity(entry.apply_url_raw)) is not None
             and identity in held_identities
         }
     return replace(
         batch,
-        jobs=tuple(job for job in batch.jobs if job.id in allowed - blocked_pending),
+        jobs=tuple(job for job in batch.jobs if job.id in allowed - blocked_hydration),
         quarantined=tuple(entry for entry in batch.quarantined if entry.id in allowed),
         detail_fetches=tuple(
             replace(entry, resolved=False, failed=True)
-            if entry.id.removeprefix(FEED_DETAIL_PREFIX) in blocked_pending
+            if entry.id.removeprefix(FEED_DETAIL_PREFIX) in blocked_hydration
             else entry
             for entry in batch.detail_fetches
             if entry.id.removeprefix(FEED_DETAIL_PREFIX) in allowed
@@ -702,34 +701,56 @@ def _protect_screened_feed_rows(
     return batch, tuple(verified), len(blocked)
 
 
-def _hold_matching_hydrated_jobs(
-    conn: sqlite3.Connection, batch: SourceBatch, verified: set[str]
-) -> SourceBatch:
-    if batch.source != "hanzili" or batch.hydration_expected is None:
+def _hold_matching_hydrated_jobs(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
+    if batch.source != "hanzili" or not (batch.feed_source or batch.hydration_expected is not None):
         return batch
-    rejections = {
-        identity: entry
-        for entry in batch.quarantined
-        if entry.id in verified
-        and entry.rejection_evidence
-        and (identity := posting_identity(entry.apply_url_raw)) is not None
-    }
+    rejections: dict[str, QuarantinedJob] = {}
+    rows = conn.execute(
+        "SELECT q.* FROM quarantine q WHERE q.source = 'hanzili' "
+        f"AND (q.rejection_evidence <> '' OR {verified_feed_hold('q')})",
+        (FEED_REJECTION_PREFIX, FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX),
+    )
+    existing = tuple(map(quarantined_from, rows))
+    for entry in existing:
+        identity = posting_identity(entry.apply_url_raw)
+        evidence = entry.rejection_evidence or entry.verified_description or entry.feed_summary
+        if identity is not None:
+            rejections.setdefault(
+                identity,
+                replace(entry, rejection_evidence=evidence or "Verified posting rejection"),
+            )
+    for entry in batch.quarantined:
+        identity = posting_identity(entry.apply_url_raw)
+        if identity is not None and entry.rejection_evidence:
+            rejections.setdefault(identity, entry)
     if not rejections:
         return batch
     rows = conn.execute(
-        "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = ? || j.id "
-        "JOIN detail_fetches f ON f.id = ? || j.id "
-        "WHERE j.source = 'hanzili' AND j.status = ? "
-        "AND d.resolved = 1 AND d.failed = 0 AND f.resolved = 1 AND f.failed = 0",
-        (FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, OPEN),
+        "SELECT j.*, EXISTS (SELECT 1 FROM detail_fetches d "
+        "JOIN detail_fetches f ON f.id = ? || j.id WHERE d.id = ? || j.id "
+        "AND d.resolved = 1 AND d.failed = 0 AND f.resolved = 1 AND f.failed = 0) "
+        "AS full_verified FROM jobs j WHERE j.source = 'hanzili' AND j.status = ?",
+        (FEED_DETAIL_PREFIX, FEED_DECISION_PREFIX, OPEN),
     )
-    held: list[QuarantinedJob] = []
+    originals = {str(row["id"]): (job_from(row), bool(row["full_verified"])) for row in rows}
+    candidates = {entry.id: entry for entry in batch.jobs}
+    screened = {entry.id: entry for entry in batch.rejection_screened}
     already_rejected = {entry.id for entry in batch.quarantined}
-    for job in map(job_from, rows):
+    held: list[QuarantinedJob] = []
+    for ident in originals.keys() | candidates.keys():
+        current, full_verified = originals.get(ident, (None, False))
+        job = candidates.get(ident) or current
+        if job is None or ident in already_rejected:
+            continue
         identity = posting_identity(job.apply_url_raw)
         rejection = rejections.get(identity) if identity is not None else None
-        if rejection is None or job.id in already_rejected:
+        if rejection is None:
             continue
+        fresh = screened.get(ident) if batch.hydration_expected is not None else None
+        body = fresh.description if fresh is not None else job.description if full_verified else ""
+        raw = current.description if current is not None and not full_verified else ""
+        if current is None and not full_verified:
+            raw = job.description
         held.append(
             QuarantinedJob(
                 id=job.id,
@@ -747,8 +768,9 @@ def _hold_matching_hydrated_jobs(
                 employment_type=job.signals.employment_type,
                 category=job.signals.category,
                 feed_summary=job.feed_summary,
-                verified_description=job.description,
+                verified_description=body,
                 rejection_evidence=rejection.rejection_evidence,
+                unverified_description=raw,
             )
         )
     held_ids = {entry.id for entry in held}
@@ -886,7 +908,7 @@ class BatchWriter(Store):
                     )
 
                 batch = replace(batch, jobs=tuple(map(preserve_oracle_detail, batch.jobs)))
-            batch = _hold_matching_hydrated_jobs(conn, batch, verified)
+            batch = _hold_matching_hydrated_jobs(conn, batch)
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             without_description = [
                 job

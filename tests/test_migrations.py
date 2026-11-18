@@ -347,7 +347,7 @@ def test_feed_summary_migration_preserves_existing_jobs_and_quarantine(
             ("feed:acme:2",),
         ).fetchone()
         assert summary is not None and tuple(summary) == ("", "")
-        assert applied_versions(upgraded._conn) == tuple(range(1, 9))
+        assert applied_versions(upgraded._conn) == tuple(range(1, 10))
     finally:
         upgraded.close()
     assert len(_snapshots(db_path)) == 1
@@ -491,8 +491,53 @@ def test_version_six_upgrade_preserves_oracle_provenance_career_and_queue_state(
             ("bamboohr:acme:held",),
         ).fetchone()
         assert tuple(held) == ("PhD required", "", "", "")
-        assert applied_versions(repo._conn) == tuple(range(1, 9))
+        assert applied_versions(repo._conn) == tuple(range(1, 10))
         assert repo._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert migrations.migrate(repo._conn, db_path) == ()
     finally:
         repo.close()
+
+
+def test_unverified_quarantine_migration_preserves_existing_evidence(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.storage import migrations
+
+    shipped = migrations.discover()
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: tuple(m for m in shipped if m.version < 9))
+        old = SqliteRepository.connect(db_path)
+        old._conn.execute(
+            "INSERT INTO quarantine (id, source, company, title_raw, reason, matched_phrase, "
+            "feed_summary, verified_description, rejection_evidence, first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "hanzili:1",
+                "hanzili",
+                "Acme",
+                "Intern",
+                "out-of-scope-degree",
+                "PhD",
+                "Current summary",
+                "Verified body",
+                "PhD required",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old.close()
+    upgraded = SqliteRepository.connect(db_path)
+    try:
+        row = upgraded._conn.execute(
+            "SELECT feed_summary, verified_description, rejection_evidence, "
+            "unverified_description FROM quarantine WHERE id = ?",
+            ("hanzili:1",),
+        ).fetchone()
+        assert row is not None and tuple(row) == (
+            "Current summary",
+            "Verified body",
+            "PhD required",
+            "",
+        )
+    finally:
+        upgraded.close()
