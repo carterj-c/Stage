@@ -1968,7 +1968,7 @@ async def test_two_syncs_advance_past_missing_quarantined_details(
             pass
         assert detail.call_count == 0
         assert await repo.get_job(current.id) is not None
-        second = await repo.detail_queue("workday", 2)
+        second = await repo.detail_queue("workday", 2, ids=[current.id])
         assert current.id in second
         later = NOW + timedelta(hours=1)
         async for _ in sync(

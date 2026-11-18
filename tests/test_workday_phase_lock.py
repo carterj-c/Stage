@@ -112,7 +112,7 @@ async def test_two_page_crawl_hydrates_current_page_despite_opposite_queue_phase
         assert stored[seed_b.id].description == "Frontend full description"
         assert stored[seed_a.id].status is JobStatus.OPEN
         assert stored[seed_b.id].status is JobStatus.OPEN
-        assert await repository.detail_queue("workday", 10) == []
+        assert await repository.detail_queue("workday", 10, ids=[seed_a.id, seed_b.id]) == []
     assert offsets == [0, 20]
     assert detail_a.call_count == detail_b.call_count == 1
 
@@ -213,7 +213,7 @@ async def test_present_board_uses_shared_slot_when_newer_queue_item_is_absent_el
         stored = {job.id: job for job in await repository.list_jobs(JobFilters(status=None))}
         assert stored[job_b.id].description == "Full frontend description"
         assert not stored[job_a.id].description
-        assert await repository.detail_queue("workday", 10) == [job_a.id]
+        assert await repository.detail_queue("workday", 10, ids=[job_a.id, job_b.id]) == [job_a.id]
 
 
 @respx.mock
