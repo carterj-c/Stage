@@ -101,7 +101,9 @@ class Repository(Protocol):
     def stale_members(self, source: str, before: datetime) -> list[SourceVisit]:
         pass
 
-    def detail_queue(self, source: str, limit: int) -> list[str]:
+    def detail_queue(
+        self, source: str, limit: int, boards: Collection[str] | None = None
+    ) -> list[str]:
         pass
 
     def detail_queue_size(self, source: str) -> int:

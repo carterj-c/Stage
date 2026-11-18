@@ -28,7 +28,8 @@ REREAD_ATTEMPTS = 2
 _QUEUED = (
     "FROM jobs j LEFT JOIN detail_fetches d ON d.id = j.id "
     "WHERE j.source = ? AND j.status = ? AND ("
-    "(j.description = '' AND (j.term = ? OR j.role = ?) AND (d.id IS NULL "
+    "(j.description = '' AND (j.source IN ('workday', 'smartrecruiters') "
+    "OR j.term = ? OR j.role = ?) AND (d.id IS NULL "
     "OR (d.failed = 1 AND d.attempts < ?) OR (d.resolved = 1 AND d.attempts < ?))) "
     "OR (j.location_raw GLOB ? AND (d.id IS NULL OR d.attempts < ?)))"
 )
@@ -62,10 +63,16 @@ def _queued(source: str) -> tuple[object, ...]:
 
 
 class DetailFetches(Store):
-    def detail_queue(self, source: str, limit: int) -> list[str]:
+    def detail_queue(
+        self, source: str, limit: int, boards: Collection[str] | None = None
+    ) -> list[str]:
+        if limit <= 0 or boards is not None and not boards:
+            return []
+        scope = "" if boards is None else f"WHERE stage_board_of(id, ?) IN {EACH} "
+        params = () if boards is None else (source, listed(boards))
         rows = self._conn.execute(
-            f"SELECT id FROM ({_QUEUE}) ORDER BY rank, first_seen DESC LIMIT ?",
-            (*_queued(source), limit),
+            f"SELECT id FROM ({_QUEUE}) {scope}ORDER BY rank, first_seen DESC, id LIMIT ?",
+            (*_queued(source), *params, limit),
         )
         return [str(row["id"]) for row in rows]
 

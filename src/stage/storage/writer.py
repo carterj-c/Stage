@@ -111,8 +111,12 @@ class AsyncRepository:
     async def stale_members(self, source: str, before: datetime) -> list[SourceVisit]:
         return await self._writer.run(lambda repository: repository.stale_members(source, before))
 
-    async def detail_queue(self, source: str, limit: int) -> list[str]:
-        return await self._writer.run(lambda repository: repository.detail_queue(source, limit))
+    async def detail_queue(
+        self, source: str, limit: int, boards: Collection[str] | None = None
+    ) -> list[str]:
+        return await self._writer.run(
+            lambda repository: repository.detail_queue(source, limit, boards)
+        )
 
     async def detail_queue_size(self, source: str) -> int:
         return await self._writer.run(lambda repository: repository.detail_queue_size(source))

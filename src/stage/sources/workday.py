@@ -258,12 +258,15 @@ class WorkdayAdapter:
         ceiling: int,
         full_reads: Sequence[str] = (),
         glances: Collection[str] = (),
+        queued_details: int = 0,
     ) -> tuple[dict[str, int], int]:
         if not companies:
             raise ValueError("a Workday crawl needs at least one board")
         available = max(1, ceiling - cls.retry_reserve)
         budgets = {company.registry_key: 1 for company in companies}
         remaining = max(0, available - len(budgets))
+        reserved_details = min(cls.detail_budget, queued_details, (remaining + 1) // 2)
+        remaining -= reserved_details
         demands: list[tuple[int, str]] = []
         for company in companies:
             crawl = crawls.get(board_key(cls.name, _board(company)))
@@ -295,7 +298,7 @@ class WorkdayAdapter:
             extra = max(0, min(remaining, cls.crawl_page_cap + SEARCH_PAGES - budgets[key]))
             budgets[key] += extra
             remaining -= extra
-        details = min(cls.detail_budget, max(0, remaining))
+        details = reserved_details + min(cls.detail_budget - reserved_details, max(0, remaining))
         remaining = max(0, remaining - details - cls.check_reserve)
         for key in full_reads:
             if key not in budgets:

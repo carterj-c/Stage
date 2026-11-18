@@ -38,7 +38,9 @@ def _job(ident: str, **kwargs: object) -> Job:
     return replace(base, **kwargs)  # type: ignore[arg-type]
 
 
-async def test_only_rows_a_description_could_change_are_queued(db_path: Path) -> None:
+async def test_missing_descriptions_are_queued_even_with_known_classifications(
+    db_path: Path,
+) -> None:
     async with open_repository(db_path) as repository:
         await repository.apply_source_batch(
             SourceBatch(
@@ -60,8 +62,7 @@ async def test_only_rows_a_description_could_change_are_queued(db_path: Path) ->
         )
         queued = await repository.detail_queue("smartrecruiters", 50)
 
-    assert set(queued) == {"needs-both", "needs-term", "needs-role"}
-    assert "resolved" not in queued
+    assert set(queued) == {"needs-both", "needs-term", "needs-role", "resolved"}
     assert "has-body" not in queued
 
 
