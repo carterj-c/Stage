@@ -43,7 +43,6 @@ from stage.storage.rows import (
     UPSERT_VISIT,
     job_from,
     job_params,
-    quarantined_from,
     quarantined_params,
     rate_state_params,
     stored_locations,
@@ -445,11 +444,6 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
         row = conn.execute("SELECT * FROM jobs WHERE id = ?", (expected.id,)).fetchone()
         if row is not None and job_from(row) == expected:
             allowed.add(expected.id)
-    for rejected in batch.hydration_quarantine_expected:
-        row = conn.execute("SELECT * FROM quarantine WHERE id = ?", (rejected.id,)).fetchone()
-        listed_job = conn.execute("SELECT 1 FROM jobs WHERE id = ?", (rejected.id,)).fetchone()
-        if row is not None and listed_job is None and quarantined_from(row) == rejected:
-            allowed.add(rejected.id)
     return replace(
         batch,
         jobs=tuple(job for job in batch.jobs if job.id in allowed),

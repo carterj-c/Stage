@@ -70,7 +70,6 @@ class SourceBatch:
     closes_whole_source: bool = False
     list_sources: frozenset[str] = frozenset()
     hydration_expected: tuple[Job, ...] | None = None
-    hydration_quarantine_expected: tuple[QuarantinedJob, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +104,7 @@ class Repository(Protocol):
 
     def feed_hydration_queue(
         self, sources: Collection[str], now: datetime, limit: int, *, offset: int = 0
-    ) -> list[Job | QuarantinedJob]:
+    ) -> list[Job]:
         pass
 
     def detail_queue(self, source: str, limit: int) -> list[str]:

@@ -243,7 +243,9 @@ class Upkeep(Store):
             successors = promote_orphaned_duplicates(conn, ids)
             followed = tuple(sorted(heirs_of(conn, set(ids), successors).items()))
             forgotten = conn.execute(
-                "DELETE FROM quarantine WHERE last_seen < ?", (cutoff,)
+                "DELETE FROM quarantine WHERE last_seen < ? AND NOT EXISTS "
+                "(SELECT 1 FROM detail_fetches d WHERE d.id = ? || quarantine.id)",
+                (cutoff, FEED_DETAIL_PREFIX),
             ).rowcount
             _forget_checks(conn, ids)
             conn.execute(
@@ -278,8 +280,9 @@ class Upkeep(Store):
         )
         stale = count(
             self._conn,
-            "SELECT COUNT(*) FROM quarantine WHERE last_seen < ?",
-            (_rejections_cutoff(now),),
+            "SELECT COUNT(*) FROM quarantine WHERE last_seen < ? AND NOT EXISTS "
+            "(SELECT 1 FROM detail_fetches d WHERE d.id = ? || quarantine.id)",
+            (_rejections_cutoff(now), FEED_DETAIL_PREFIX),
         )
         return PurgeResult(purged=expired, tombstoned=expired, forgotten=stale)
 

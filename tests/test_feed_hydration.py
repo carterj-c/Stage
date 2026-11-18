@@ -597,94 +597,175 @@ async def test_provider_paging_stops_at_time_ceiling(
 
 
 @respx.mock
-async def test_held_posting_recovers_only_after_verified_weekly_refetch(db_path: Path) -> None:
-    respx.get(FEED_URL).respond(200, json={})
-    route = respx.get(GH + "123").respond(
-        200, json=payload(body="Applicants must be enrolled in a PhD program.")
-    )
-    async with open_repository(db_path) as repo:
-        await sync(repo)
-        original = (await repo.list_quarantined(QuarantineFilters(source="test-feed")))[0]
-        route.respond(200, json=payload(body="Build systems. Bachelor's students welcome."))
-        await sync(repo, NOW + timedelta(days=6))
-        assert await repo.get_job(job().id) is None
-        assert route.call_count == 1
-        await sync(repo, NOW + timedelta(days=7))
-        recovered = await repo.get_job(job().id)
-        assert recovered is not None and "Bachelor's students welcome" in recovered.description
-        assert recovered.first_seen == original.first_seen
-        assert recovered.last_seen == NOW + timedelta(days=7)
-        assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))
-    assert route.call_count == 2
-    assert attempt(db_path) == (1, 0, 2)
-
-
-@respx.mock
-@pytest.mark.parametrize("result", ["still-rejected", "error", "mismatch", "304"])
-async def test_weekly_recheck_keeps_hold_without_verified_eligible_body(
-    db_path: Path,
-    result: str,
-) -> None:
-    respx.get(FEED_URL).respond(200, json={})
-    route = respx.get(GH + "123").respond(
-        200, json=payload(body="Applicants must be enrolled in a PhD program.")
-    )
-    async with open_repository(db_path) as repo:
-        await sync(repo)
-        response = {
-            "still-rejected": httpx.Response(
-                200,
-                json=payload(
-                    body="Applicants must be enrolled in a PhD program.",
-                ),
-            ),
-            "error": httpx.Response(404, json={"error": "not found"}),
-            "mismatch": httpx.Response(200, json=payload(456)),
-            "304": httpx.Response(304),
-        }[result]
-        route.mock(return_value=response)
-        await sync(repo, NOW + timedelta(days=7))
-        await sync(repo, NOW + timedelta(days=7, hours=6))
-        assert await repo.get_job(job().id) is None
-        rejected = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
-        assert len(rejected) == 1 and "phd" in rejected[0].matched_phrase
-        assert route.call_count == 2
-        route.respond(200, json=payload(body="Build software systems"))
-        await sync(repo, NOW + timedelta(days=14))
-        recovered = await repo.get_job(job().id)
-        assert recovered is not None and recovered.description == "Build software systems"
-    assert route.call_count == 3
-
-
-@respx.mock
-async def test_changed_quarantine_snapshot_blocks_recovery(
+async def test_held_changed_metadata_signals_and_live_requirements_do_not_release(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from stage.domain import SourceSignals
+
+    respx.get(FEED_URL).respond(200, json={})
+    original = respx.get(GH + "123").respond(
+        200, json=payload(body="Applicants must be enrolled in a PhD program.")
+    )
+    changed_url = "https://boards.greenhouse.io/acme/jobs/456"
+    replacement = respx.get(GH + "456").respond(200, json=payload(456))
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        changed = replace(
+            job(),
+            title_raw="Senior Designer",
+            title_normalized="Senior Designer",
+            location_raw="Paris, France",
+            apply_url_raw=changed_url,
+            signals=SourceSignals(
+                terms=("Summer 2028",),
+                degrees=("PhD",),
+                sponsorship="no",
+                season="Summer",
+                category="Design",
+                employment_type="full-time",
+            ),
+            source_posted_at=NOW + timedelta(days=2),
+        )
+
+        async def refreshed(self: Feed, client: object, now: datetime) -> FetchResult:
+            return FetchResult(jobs=(replace(changed, last_seen=now),))
+
+        monkeypatch.setattr(Feed, "fetch", refreshed)
+        original.respond(200, json=payload(body="Bachelor's students welcome."))
+        for elapsed in (7, 20, 100):
+            await sync(repo, NOW + timedelta(days=elapsed))
+            assert await repo.get_job(job().id) is None
+            rejected = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+            assert len(rejected) == 1 and "phd" in rejected[0].matched_phrase
+        assert attempt(db_path) == (1, 0, 1)
+    assert original.call_count == 1
+    assert replacement.call_count == 0
+
+
+@respx.mock
+async def test_removed_feed_posting_cannot_be_reopened(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    respx.get(FEED_URL).respond(200, json={})
     route = respx.get(GH + "123").respond(
+        200, json=payload(body="Applicants must be enrolled in a PhD program.")
+    )
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        route.respond(200, json=payload(body="Bachelor's students welcome."))
+
+        async def absent(self: Feed, client: object, now: datetime) -> FetchResult:
+            return FetchResult(jobs=())
+
+        monkeypatch.setattr(Feed, "fetch", absent)
+        await sync(repo, NOW + timedelta(days=100))
+        assert await repo.get_job(job().id) is None
+        rejected = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+        assert len(rejected) == 1
+        assert await repo.preview_purge(NOW + timedelta(days=101)) == await repo.purge(
+            NOW + timedelta(days=101)
+        )
+        assert len(await repo.list_quarantined(QuarantineFilters(source="test-feed"))) == 1
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_duplicate_restoration_does_not_release_a_held_copy(db_path: Path) -> None:
+    from stage.domain import DetailFetch, RejectionReason
+
+    held = QuarantinedJob(
+        id=job(124).id,
+        source="test-feed",
+        company="Acme",
+        title_raw=job(124).title_raw,
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase=f"copy of {job().id} rejected for phd",
+        first_seen=job(124).first_seen,
+        last_seen=job(124).last_seen,
+        apply_url_raw=job(124).apply_url_raw,
+        location_raw=job(124).location_raw,
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW,
+                quarantined=(held,),
+                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + held.id, resolved=True),),
+            )
+        )
+        await seed(repo, job())
+        assert await repo.get_job(held.id) is None
+        assert (await repo.list_quarantined(QuarantineFilters(source="test-feed")))[0] == held
+        assert await repo.get_job(job().id) is not None
+
+
+@respx.mock
+async def test_held_rows_cannot_starve_ordinary_hydration(db_path: Path) -> None:
+    from stage.domain import DetailFetch, RejectionReason
+
+    held = tuple(
+        QuarantinedJob(
+            id=job(number).id,
+            source="test-feed",
+            company="Acme",
+            title_raw=job(number).title_raw,
+            reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+            matched_phrase="phd required",
+            first_seen=job(number).first_seen,
+            last_seen=job(number).last_seen,
+            apply_url_raw=job(number).apply_url_raw,
+            location_raw=job(number).location_raw,
+        )
+        for number in range(100, 140)
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        number = int(request.url.path.rsplit("/", 1)[1])
+        return httpx.Response(200, json=payload(number))
+
+    route = respx.route(host="boards-api.greenhouse.io").mock(side_effect=respond)
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW,
+                quarantined=held,
+                detail_fetches=tuple(
+                    DetailFetch(FEED_DETAIL_PREFIX + entry.id, resolved=True) for entry in held
+                ),
+            )
+        )
+        await seed(repo, *(job(number) for number in range(200, 230)))
+        result = await hydrate(repo, NOW + timedelta(days=10))
+        assert sum(batch.updated for batch in result.batches) == 30
+        assert (
+            len(await repo.list_quarantined(QuarantineFilters(source="test-feed", limit=None)))
+            == 40
+        )
+    assert route.call_count == 30
+    assert all(int(call.request.url.path.rsplit("/", 1)[1]) >= 200 for call in route.calls)
+
+
+@respx.mock
+async def test_batch_guard_cannot_promote_a_quarantined_row_during_a_race(db_path: Path) -> None:
+    respx.get(GH + "123").respond(
         200, json=payload(body="Applicants must be enrolled in a PhD program.")
     )
     async with open_repository(db_path) as repo:
         await seed(repo, job())
+        snapshot = await repo.get_job(job().id)
+        assert snapshot is not None
         await hydrate(repo)
-        route.respond(200, json=payload(body="Build software systems"))
-        screen = Screener.__call__
-
-        async def race(
-            self: Screener,
-            jobs: list[Job],
-        ) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
-            result = await screen(self, jobs)
-            with sqlite3.connect(db_path) as conn:
-                conn.execute(
-                    "UPDATE quarantine SET matched_phrase = ? WHERE id = ?",
-                    ("Changed rejection evidence", job().id),
-                )
-            return result
-
-        monkeypatch.setattr(Screener, "__call__", race)
-        await hydrate(repo, NOW + timedelta(days=7))
+        proposed = replace(snapshot, description="Bachelor's students welcome.")
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW + timedelta(days=8),
+                jobs=(proposed,),
+                hydration_expected=(snapshot,),
+            )
+        )
         assert await repo.get_job(job().id) is None
-        rejected = await repo.list_quarantined(QuarantineFilters(source="test-feed"))
-        assert rejected[0].matched_phrase == "Changed rejection evidence"
-    assert attempt(db_path) == (1, 0, 1)
+        assert len(await repo.list_quarantined(QuarantineFilters(source="test-feed"))) == 1

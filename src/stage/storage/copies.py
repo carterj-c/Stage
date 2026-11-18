@@ -12,6 +12,7 @@ from stage.domain import (
     board_of,
     source_rank,
 )
+from stage.domain.visits import FEED_DETAIL_PREFIX
 from stage.storage.repository import Resolver, SourceBatch
 from stage.storage.rows import OPEN, UPSERT_JOB, job_from, job_params, quarantined_from
 from stage.storage.sql import EACH, fold_company, listed
@@ -219,7 +220,9 @@ def restore_copies(conn: sqlite3.Connection, accepted: Mapping[str, JobLevel]) -
     if not accepted:
         return
     rows = conn.execute(
-        "SELECT * FROM quarantine WHERE reason = ? AND matched_phrase GLOB ?", (_DEGREE, _COPY_GLOB)
+        "SELECT * FROM quarantine q WHERE reason = ? AND matched_phrase GLOB ? "
+        "AND NOT EXISTS (SELECT 1 FROM detail_fetches d WHERE d.id = ? || q.id)",
+        (_DEGREE, _COPY_GLOB, FEED_DETAIL_PREFIX),
     )
     back = [
         replace(as_job(entry, origin), level=accepted[origin])

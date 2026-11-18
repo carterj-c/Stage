@@ -7,14 +7,13 @@ from datetime import datetime
 
 import httpx
 
-from stage.domain import DetailFetch, Job, QuarantinedJob, RequestLogged
+from stage.domain import DetailFetch, Job, RequestLogged
 from stage.domain.visits import FEED_DETAIL_PREFIX
 from stage.http import HostBudget, HttpClient, HttpError, RatePosture, RequestRefusedError, resolve
 from stage.services.hydration_targets import HOSTS, fetch_target, target_for_url
 from stage.services.screening import Screener
 from stage.sources import get_adapter, platform_bucket, platform_front
 from stage.storage import AsyncRepository, SourceBatch, SourceBatchResult
-from stage.storage.copies import as_job
 
 REQUESTS_PER_SYNC = 30
 HYDRATION_SECONDS = 60.0
@@ -30,9 +29,9 @@ async def _queued_jobs(
     repository: AsyncRepository,
     sources: Collection[str],
     now: datetime,
-    first_page: list[Job | QuarantinedJob],
+    first_page: list[Job],
     deadline: float,
-) -> AsyncIterator[Job | QuarantinedJob]:
+) -> AsyncIterator[Job]:
     page = first_page
     offset = 0
     while page and time.monotonic() < deadline:
@@ -78,7 +77,6 @@ async def hydrate_feeds(
         bucket = host_buckets[host]
         profiles[bucket] = profiles.get(bucket, posture).strictest(posture)
     originals: dict[str, list[Job]] = {}
-    rejection_snapshots: dict[str, list[QuarantinedJob]] = {}
     collected: dict[str, list[Job]] = {}
     outcomes: dict[str, list[DetailFetch]] = {}
     requests: list[RequestLogged] = []
@@ -96,8 +94,7 @@ async def hydrate_feeds(
         request_limit=REQUESTS_PER_SYNC,
         allow_redirects=False,
     ) as client:
-        async for candidate in _queued_jobs(repository, sources, now, queued, deadline):
-            job = as_job(candidate) if isinstance(candidate, QuarantinedJob) else candidate
+        async for job in _queued_jobs(repository, sources, now, queued, deadline):
             if (
                 client.request_count >= REQUESTS_PER_SYNC
                 or attempted >= REQUESTS_PER_SYNC
@@ -125,10 +122,7 @@ async def hydrate_feeds(
                 finally:
                     requests.extend(client.drain_requests(job.source))
             attempted += 1
-            if isinstance(candidate, QuarantinedJob):
-                rejection_snapshots.setdefault(job.source, []).append(candidate)
-            else:
-                originals.setdefault(job.source, []).append(job)
+            originals.setdefault(job.source, []).append(job)
             complete = detail is not None and detail.complete and bool(detail.description.strip())
             if complete and detail is not None:
                 collected.setdefault(job.source, []).append(
@@ -140,7 +134,7 @@ async def hydrate_feeds(
         settled = client.rate_state(now)
     batches: list[SourceBatchResult] = []
     pending_states = settled
-    for source in sorted(set(originals) | set(rejection_snapshots) | {queued[0].source}):
+    for source in sorted(set(originals) | {queued[0].source}):
         kept, rejected = await screener(collected.get(source, []))
         counts = await repository.apply_source_batch(
             SourceBatch(
@@ -151,7 +145,6 @@ async def hydrate_feeds(
                 detail_fetches=tuple(outcomes.get(source, [])),
                 rate_state=pending_states,
                 hydration_expected=tuple(originals.get(source, [])),
-                hydration_quarantine_expected=tuple(rejection_snapshots.get(source, [])),
             )
         )
         pending_states = ()
