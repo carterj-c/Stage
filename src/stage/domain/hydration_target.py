@@ -44,6 +44,7 @@ def target_for_url(url: object) -> HydrationTarget | None:
         match = re.fullmatch(rf"/({_SLUG})/({_UUID})(?:/apply)?/?", path)
         if match:
             account, posting_id = match.groups()
+            posting_id = posting_id.lower()
             return HydrationTarget(
                 "lever",
                 account,
@@ -54,6 +55,7 @@ def target_for_url(url: object) -> HydrationTarget | None:
         match = re.fullmatch(rf"/({_SLUG})/({_UUID})(?:/application)?/?", path)
         if match:
             account, posting_id = match.groups()
+            posting_id = posting_id.lower()
             return HydrationTarget(
                 "ashby",
                 account,

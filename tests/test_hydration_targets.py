@@ -249,6 +249,18 @@ async def test_empty_optional_workable_sections_are_explicitly_valid() -> None:
     assert result is not None and result.complete
 
 
+@pytest.mark.parametrize("provider", ["ashby", "lever"])
+async def test_posting_uuid_case_is_normalized(provider: str) -> None:
+    url = URLS[provider].replace(UUID, UUID.upper())
+    resolved = target_for_url(url)
+    assert resolved == target(provider)
+    data = posting(provider)
+    response = {"jobs": [data]} if provider == "ashby" else data
+    async with client_for(httpx.Response(200, json=response)) as client:
+        detail = await fetch_target(resolved, client)
+    assert detail is not None and detail.complete
+
+
 async def test_ashby_accepts_documented_posting_without_id() -> None:
     job = posting("ashby")
     del job["id"]

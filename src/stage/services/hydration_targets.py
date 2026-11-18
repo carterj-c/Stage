@@ -62,14 +62,17 @@ def _ashby_detail(target: HydrationTarget, data: dict[str, object]) -> Hydration
         job
         for job in jobs
         if isinstance(job, dict)
-        and (job.get("id") == target.posting_id or target_for_url(job.get("jobUrl")) == target)
+        and (
+            (isinstance(job.get("id"), str) and job["id"].lower() == target.posting_id)
+            or target_for_url(job.get("jobUrl")) == target
+        )
     ]
     if len(matches) != 1:
         return None
     job = matches[0]
     if target_for_url(job.get("jobUrl")) != target or not _has_text(job.get("title")):
         return None
-    if "id" in job and job["id"] != target.posting_id:
+    if "id" in job and (not isinstance(job["id"], str) or job["id"].lower() != target.posting_id):
         return None
     if job.get("isListed") is not True:
         return None
@@ -105,7 +108,11 @@ def _json_detail(target: HydrationTarget, data: object) -> HydrationDetail | Non
             return None
         body = "\n\n".join(text for field in fields if (text := _body(data[field])))
         return HydrationDetail(body, True) if body else None
-    if target.provider != "lever" or data.get("id") != target.posting_id:
+    if (
+        target.provider != "lever"
+        or not isinstance(data.get("id"), str)
+        or data["id"].lower() != target.posting_id
+    ):
         return None
     if not _has_text(data.get("text")):
         return None
