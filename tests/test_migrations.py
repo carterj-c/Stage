@@ -316,6 +316,23 @@ def test_feed_summary_migration_preserves_existing_jobs_and_quarantine(
             ),
         )
         old._conn.execute(
+            "INSERT INTO jobs (id, source, company, title_raw, title_normalized, apply_url_raw, "
+            "description, work_auth_flag, first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "hanzili:acme:restricted",
+                "hanzili",
+                "Acme",
+                "Intern",
+                "intern",
+                "https://boards.greenhouse.io/acme/jobs/124",
+                "US citizens only",
+                1,
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old._conn.execute(
             "INSERT INTO quarantine (id, source, company, title_raw, reason, "
             "first_seen, last_seen) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -341,7 +358,10 @@ def test_feed_summary_migration_preserves_existing_jobs_and_quarantine(
             legacy is not None
             and legacy.description == ""
             and legacy.feed_summary == "Short summary"
+            and legacy.work_auth_flag is None
         )
+        restricted = upgraded.get_job("hanzili:acme:restricted")
+        assert restricted is not None and restricted.work_auth_flag is True
         summary = upgraded._conn.execute(
             "SELECT feed_summary, verified_description FROM quarantine WHERE id = ?",
             ("feed:acme:2",),
