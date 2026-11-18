@@ -70,7 +70,17 @@ class SourceBatch:
     detail_queue_cursor: str | None = None
     detail_queue_selected: tuple[str, ...] | None = None
     closes_whole_source: bool = False
+    feed_source: bool = False
+    feed_summary_source: bool = False
+    feed_full_source: bool = False
+    feed_expected: tuple[Job, ...] | None = None
+    feed_quarantine_expected: tuple[QuarantinedJob, ...] = ()
+    feed_quarantine_urls: tuple[str, ...] = ()
+    pending_expected: tuple[QuarantinedJob, ...] = ()
     list_sources: frozenset[str] = frozenset()
+    hydration_expected: tuple[Job, ...] | None = None
+    rejection_expected: tuple[Job, ...] | None = None
+    rejection_screened: tuple[Job, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +95,7 @@ class SourceBatchResult:
     duplicates: int = 0
     stored: int = 0
     successors: tuple[tuple[str, str], ...] = ()
+    conflicts: int = 0
 
 
 class Repository(Protocol):
@@ -103,6 +114,17 @@ class Repository(Protocol):
     def stale_members(self, source: str, before: datetime) -> list[SourceVisit]:
         pass
 
+    def feed_hydration_queue(
+        self,
+        sources: Collection[str],
+        now: datetime,
+        limit: int,
+        *,
+        offset: int = 0,
+        pending_sources: Collection[str] | None = None,
+    ) -> list[Job | QuarantinedJob]:
+        pass
+
     def detail_queue(
         self,
         source: str,
@@ -114,6 +136,20 @@ class Repository(Protocol):
         pass
 
     def detail_queue_size(self, source: str) -> int:
+        pass
+
+    def feed_quarantined(
+        self, ids: Collection[str], source: str = "", urls: Collection[str] = ()
+    ) -> list[QuarantinedJob]:
+        pass
+
+    def feed_pending_ids(self, ids: Collection[str]) -> set[str]:
+        pass
+
+    def feed_jobs(self, ids: Collection[str]) -> list[Job]:
+        pass
+
+    def verified_feed_jobs(self, ids: Collection[str]) -> list[Job]:
         pass
 
     def stored_details(self, ids: Collection[str]) -> dict[str, tuple[str, str]]:

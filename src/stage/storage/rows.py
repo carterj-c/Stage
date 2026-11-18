@@ -89,6 +89,7 @@ JOB_COLUMNS = (
     "first_seen",
     "last_seen",
     "source_posted_at",
+    "feed_summary",
     "duplicate_of",
 )
 UPSERT_JOB = upsert(
@@ -123,12 +124,27 @@ QUARANTINE_COLUMNS = (
     "last_seen",
     "employment_type",
     "category",
+    "feed_summary",
+    "verified_description",
+    "rejection_evidence",
 )
 UPSERT_QUARANTINE = upsert(
     "quarantine",
     QUARANTINE_COLUMNS,
     "id",
-    refreshed(*(column for column in QUARANTINE_COLUMNS[1:] if column != "first_seen")),
+    [
+        (
+            "rejection_evidence = CASE WHEN quarantine.rejection_evidence <> '' "
+            "THEN quarantine.rejection_evidence ELSE excluded.rejection_evidence END"
+            if column == "rejection_evidence"
+            else "verified_description = coalesce(nullif(excluded.verified_description, ''), "
+            "quarantine.verified_description)"
+            if column == "verified_description"
+            else f"{column} = excluded.{column}"
+        )
+        for column in QUARANTINE_COLUMNS[1:]
+        if column != "first_seen"
+    ],
 )
 
 _RATE_STATE_COLUMNS = (
@@ -295,6 +311,7 @@ def job_from(row: sqlite3.Row) -> Job:
         apply_url_raw=row["apply_url_raw"],
         apply_url_canonical=row["apply_url_canonical"],
         description=row["description"],
+        feed_summary=row["feed_summary"],
         location_raw=row["location_raw"],
         location=location_bucket(row["location"]),
         remote_scope=_scope(row["remote_scope"]),
@@ -347,6 +364,7 @@ def job_params(job: Job) -> tuple[Any, ...]:
         to_text(job.first_seen),
         to_text(job.last_seen),
         to_text(job.source_posted_at) if job.source_posted_at else None,
+        job.feed_summary,
         job.duplicate_of,
     )
 
@@ -367,6 +385,9 @@ def quarantined_from(row: sqlite3.Row) -> QuarantinedJob:
         matched_phrase=row["matched_phrase"],
         employment_type=row["employment_type"],
         category=row["category"],
+        feed_summary=row["feed_summary"],
+        verified_description=row["verified_description"],
+        rejection_evidence=row["rejection_evidence"],
     )
 
 
@@ -386,6 +407,9 @@ def quarantined_params(entry: QuarantinedJob, first_seen: datetime) -> tuple[Any
         to_text(entry.last_seen),
         entry.employment_type,
         entry.category,
+        entry.feed_summary,
+        entry.verified_description,
+        entry.rejection_evidence,
     )
 
 

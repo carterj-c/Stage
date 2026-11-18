@@ -536,3 +536,57 @@ if sys.platform != "win32":
 
         assert signal.SIGINT in held
         assert signal.SIGINT not in after
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        (True, True, True),
+        (True, False, True),
+        (False, True, True),
+        (True, None, True),
+        (None, True, True),
+        (False, False, False),
+        (None, False, None),
+        (False, None, None),
+        (None, None, None),
+    ],
+)
+def test_combining_work_authorization_preserves_unknown(
+    left: bool | None, right: bool | None, expected: bool | None
+) -> None:
+    from stage.services.screening import combine_work_auth
+
+    assert combine_work_auth(left, right) is expected
+
+
+@pytest.mark.parametrize(
+    ("body", "summary", "expected"),
+    [
+        ("", "Finance risk analysis.", None),
+        ("Build finance systems.", "Must be a US citizen.", True),
+        ("Must be a US citizen.", "Finance analysis.", True),
+        ("Build finance systems.", "Finance analysis.", False),
+    ],
+)
+def test_feed_summary_and_body_keep_senior_roles_and_tristate_auth(
+    body: str, summary: str, expected: bool | None
+) -> None:
+    from dataclasses import replace
+
+    from stage.domain import JobLevel, RoleCategory
+
+    job = replace(
+        _jobs(1)[0],
+        source="hanzili",
+        title_raw="Senior Investment Banking Analyst",
+        title_normalized="senior investment banking analyst",
+        description=body,
+        feed_summary=summary,
+        location_raw="Montreal, QC",
+    )
+    kept, rejected = normalize_batch([job])
+    assert not rejected and len(kept) == 1
+    assert kept[0].level is JobLevel.SENIOR
+    assert {RoleCategory.FINANCE, RoleCategory.INVESTMENT_BANKING} <= set(kept[0].roles)
+    assert kept[0].work_auth_flag is expected

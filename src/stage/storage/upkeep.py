@@ -19,8 +19,24 @@ from stage.domain import (
     source_rank,
 )
 from stage.domain.liveness import CHECK_PREFIX
+from stage.domain.visits import (
+    FEED_DECISION_PREFIX,
+    FEED_DETAIL_PREFIX,
+    FEED_PENDING_PREFIX,
+    FEED_REJECTION_PREFIX,
+)
 from stage.storage.rows import CLOSED, OPEN, UPSERT_DETAIL, UPSERT_HEIR, UPSERT_TOMBSTONE
-from stage.storage.sql import EACH, Store, count, from_text, listed, marks, starting, to_text
+from stage.storage.sql import (
+    EACH,
+    Store,
+    count,
+    from_text,
+    listed,
+    marks,
+    starting,
+    to_text,
+    verified_feed_hold,
+)
 
 MAX_CHAIN_REPAIR_PASSES = 8
 RULES_CHANGED = f"{RULES_PREFIX}changed"
@@ -180,7 +196,23 @@ def _forget_checks(conn: sqlite3.Connection, leaving: Sequence[str]) -> None:
         "(SELECT 1 FROM jobs j WHERE j.id = substr(detail_fetches.id, ?))",
         (starting(CHECK_PREFIX), len(CHECK_PREFIX) + 1),
     )
+    for prefix in (
+        FEED_DETAIL_PREFIX,
+        FEED_REJECTION_PREFIX,
+        FEED_DECISION_PREFIX,
+        FEED_PENDING_PREFIX,
+    ):
+        conn.execute(
+            "DELETE FROM detail_fetches WHERE id GLOB ? AND NOT EXISTS "
+            "(SELECT 1 FROM jobs j WHERE j.id = substr(detail_fetches.id, ?)) "
+            "AND NOT EXISTS (SELECT 1 FROM quarantine q WHERE q.id = substr(detail_fetches.id, ?))",
+            (starting(prefix), len(prefix) + 1, len(prefix) + 1),
+        )
     kept = (
+        FEED_DETAIL_PREFIX,
+        FEED_REJECTION_PREFIX,
+        FEED_DECISION_PREFIX,
+        FEED_PENDING_PREFIX,
         CHECK_PREFIX,
         HELD_CLOSE_PREFIX,
         FULL_READ_PREFIX,
@@ -235,7 +267,9 @@ class Upkeep(Store):
             successors = promote_orphaned_duplicates(conn, ids)
             followed = tuple(sorted(heirs_of(conn, set(ids), successors).items()))
             forgotten = conn.execute(
-                "DELETE FROM quarantine WHERE last_seen < ?", (cutoff,)
+                "DELETE FROM quarantine WHERE last_seen < ? "
+                f"AND rejection_evidence = '' AND NOT {verified_feed_hold('quarantine')}",
+                (cutoff, FEED_REJECTION_PREFIX, FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX),
             ).rowcount
             _forget_checks(conn, ids)
             conn.execute(
@@ -270,8 +304,14 @@ class Upkeep(Store):
         )
         stale = count(
             self._conn,
-            "SELECT COUNT(*) FROM quarantine WHERE last_seen < ?",
-            (_rejections_cutoff(now),),
+            "SELECT COUNT(*) FROM quarantine WHERE last_seen < ? "
+            f"AND rejection_evidence = '' AND NOT {verified_feed_hold('quarantine')}",
+            (
+                _rejections_cutoff(now),
+                FEED_REJECTION_PREFIX,
+                FEED_DECISION_PREFIX,
+                FEED_DETAIL_PREFIX,
+            ),
         )
         return PurgeResult(purged=expired, tombstoned=expired, forgotten=stale)
 

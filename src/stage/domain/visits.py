@@ -74,6 +74,10 @@ class DetailFetch:
     failed: bool = False
 
 
+FEED_PENDING_PREFIX = "feed-pending:"
+FEED_DETAIL_PREFIX = "feed-detail:"
+FEED_REJECTION_PREFIX = "feed-rejected:"
+FEED_DECISION_PREFIX = "feed-decision:"
 FULL_READ_PREFIX = "full:"
 SEARCH_PREFIX = "search:"
 FIRST_READ_PREFIX = "first:"

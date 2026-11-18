@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from stage.domain import (
     UNKNOWN_TERM,
     Job,
+    QuarantinedJob,
     RateState,
     RejectionReason,
     RoleCategory,
@@ -19,7 +20,13 @@ from stage.domain.liveness import (
     LivenessCheck,
 )
 from stage.domain.text import LOCATION_COUNT_GLOB
-from stage.domain.visits import ORACLE_DETAIL_REFRESH_DAYS
+from stage.domain.visits import (
+    FEED_DECISION_PREFIX,
+    FEED_DETAIL_PREFIX,
+    FEED_PENDING_PREFIX,
+    FEED_REJECTION_PREFIX,
+    ORACLE_DETAIL_REFRESH_DAYS,
+)
 from stage.storage.rows import (
     BAMBOO_QUARANTINE_REFRESH_DAYS,
     CLOSED,
@@ -27,9 +34,19 @@ from stage.storage.rows import (
     UPSERT_CHECK,
     UPSERT_PUSHBACK,
     job_from,
+    quarantined_from,
     rate_state_params,
 )
-from stage.storage.sql import EACH, Store, count, from_text, link_of, listed, to_text
+from stage.storage.sql import (
+    EACH,
+    Store,
+    count,
+    from_text,
+    link_of,
+    listed,
+    to_text,
+    verified_feed_hold,
+)
 from stage.storage.upkeep import promote_open_copies, remember_heirs
 
 MAX_DETAIL_ATTEMPTS = 3
@@ -97,6 +114,60 @@ def _queued(source: str, now: datetime) -> tuple[object, ...]:
 
 
 class DetailFetches(Store):
+    def feed_hydration_queue(
+        self,
+        sources: Collection[str],
+        now: datetime,
+        limit: int,
+        *,
+        offset: int = 0,
+        pending_sources: Collection[str] | None = None,
+    ) -> list[Job | QuarantinedJob]:
+        rows = self._conn.execute(
+            "SELECT id, kind FROM (SELECT id, kind, row_number() OVER "
+            "(PARTITION BY kind ORDER BY attempts, first_seen DESC, id) AS position FROM ("
+            "SELECT j.id, 0 AS kind, coalesce(d.attempts, 0) AS attempts, j.first_seen "
+            "FROM jobs j LEFT JOIN detail_fetches d ON d.id = ? || j.id "
+            f"WHERE j.source IN {EACH} AND j.status = ? AND j.description = '' "
+            "AND (d.id IS NULL OR (d.resolved = 0 AND d.attempts < ? AND d.fetched_at <= ?)) "
+            "UNION ALL SELECT q.id, 1 AS kind, coalesce(d.attempts, 0) AS attempts, q.first_seen "
+            "FROM quarantine q JOIN detail_fetches p ON p.id = ? || q.id "
+            "JOIN source_visits v ON v.source = q.source AND v.board = q.source "
+            "LEFT JOIN detail_fetches d ON d.id = ? || q.id "
+            f"WHERE q.source IN {EACH} AND q.source = 'hanzili' "
+            "AND p.resolved = 1 AND p.failed = 0 "
+            "AND v.last_success_at IS NOT NULL AND v.consecutive_failures = 0 "
+            "AND (d.id IS NULL OR (d.resolved = 0 AND d.attempts < ? AND d.fetched_at <= ?)) "
+            f"AND q.rejection_evidence = '' AND NOT {verified_feed_hold('q')})) "
+            "ORDER BY position, kind LIMIT ? OFFSET ?",
+            (
+                FEED_DETAIL_PREFIX,
+                listed(sources),
+                OPEN,
+                MAX_DETAIL_ATTEMPTS,
+                to_text(now - timedelta(hours=1)),
+                FEED_PENDING_PREFIX,
+                FEED_DETAIL_PREFIX,
+                listed(sources if pending_sources is None else pending_sources),
+                MAX_DETAIL_ATTEMPTS,
+                to_text(now - timedelta(hours=1)),
+                FEED_REJECTION_PREFIX,
+                FEED_DECISION_PREFIX,
+                FEED_DETAIL_PREFIX,
+                max(0, limit),
+                max(0, offset),
+            ),
+        ).fetchall()
+        result: list[Job | QuarantinedJob] = []
+        for row in rows:
+            table = "jobs" if row["kind"] == 0 else "quarantine"
+            item = self._conn.execute(
+                f"SELECT * FROM {table} WHERE id = ?", (row["id"],)
+            ).fetchone()
+            if item is not None:
+                result.append(job_from(item) if row["kind"] == 0 else quarantined_from(item))
+        return result
+
     def detail_queue(
         self,
         source: str,
@@ -142,6 +213,38 @@ class DetailFetches(Store):
         return count(
             self._conn, f"SELECT COUNT(*) FROM ({_QUEUE})", _queued(source, datetime.now(UTC))
         )
+
+    def feed_quarantined(
+        self, ids: Collection[str], source: str = "", urls: Collection[str] = ()
+    ) -> list[QuarantinedJob]:
+        rows = self._conn.execute(
+            f"SELECT * FROM quarantine WHERE id IN {EACH} OR "
+            f"(source = ? AND apply_url_raw IN {EACH} AND rejection_evidence <> '')",
+            (listed(ids), source, listed(urls)),
+        )
+        return [quarantined_from(row) for row in rows]
+
+    def feed_pending_ids(self, ids: Collection[str]) -> set[str]:
+        rows = self._conn.execute(
+            "SELECT q.id FROM quarantine q JOIN detail_fetches p ON p.id = ? || q.id "
+            f"WHERE q.id IN {EACH}",
+            (FEED_PENDING_PREFIX, listed(ids)),
+        )
+        return {str(row["id"]) for row in rows}
+
+    def feed_jobs(self, ids: Collection[str]) -> list[Job]:
+        rows = self._conn.execute(f"SELECT * FROM jobs WHERE id IN {EACH}", (listed(ids),))
+        return [job_from(row) for row in rows]
+
+    def verified_feed_jobs(self, ids: Collection[str]) -> list[Job]:
+        rows = self._conn.execute(
+            "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = ? || j.id "
+            "JOIN detail_fetches f ON f.id = ? || j.id "
+            f"WHERE j.id IN {EACH} AND j.description <> '' "
+            "AND d.resolved = 1 AND d.failed = 0 AND f.resolved = 1 AND f.failed = 0",
+            (FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, listed(ids)),
+        )
+        return [job_from(row) for row in rows]
 
     def stored_details(self, ids: Collection[str]) -> dict[str, tuple[str, str]]:
         rows = self._conn.execute(

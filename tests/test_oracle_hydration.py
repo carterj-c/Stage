@@ -643,8 +643,10 @@ async def test_migration_rearms_exhausted_unverified_reread_without_exposing_tex
         if baseline == 5:
             patch.setattr(migrations, "discover", lambda: shipped[:5])
             with closing(SqliteRepository.connect(db_path)) as repo:
-                prior = repo.get_job(_id())
-                assert prior is not None and prior.description == ""
+                prior = repo._conn.execute(
+                    "SELECT description FROM jobs WHERE id = ?", (_id(),)
+                ).fetchone()
+                assert prior is not None and prior[0] == ""
                 assert repo.detail_queue(ADAPTER.name, 20, now=NOW) == []
     respx.get(ADAPTER.url_for(COMPANY)).respond(200, json=_listing(_posting()))
     respx.get(DETAIL_URL).respond(200, json=_detail(body="Recovered verified body"))

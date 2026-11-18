@@ -499,8 +499,13 @@ class HttpClient:
         postures: Mapping[str, RatePosture] | None = None,
         host_buckets: Mapping[str, str] | None = None,
         host_fronts: Mapping[str, str] | None = None,
+        request_limit: int | None = None,
+        allow_redirects: bool = True,
     ) -> None:
         self._allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
+        self._request_limit = request_limit
+        self._allow_redirects = allow_redirects
+        self._reserved_requests = 0
         self._host_buckets = {host.lower(): bucket for host, bucket in (host_buckets or {}).items()}
         self._host_fronts = {host.lower(): front for host, front in (host_fronts or {}).items()}
         self._touched_hosts: set[str] = set()
@@ -769,8 +774,14 @@ class HttpClient:
             async with budget.gate:
                 pending = first and self._probe_out(bucket, budget, host)
                 if not pending:
+                    if (
+                        self._request_limit is not None
+                        and self._reserved_requests >= self._request_limit
+                    ):
+                        raise HostBudgetExceededError("Stage reached this client's request limit")
                     claimed = self._refuse(bucket, budget, host, count=True, claim_probe=first)
                     budget.requests += 1
+                    self._reserved_requests += 1
                     break
             await asyncio.sleep(PROBE_WAIT_S)
         try:
@@ -786,6 +797,7 @@ class HttpClient:
         except HttpError:
             async with budget.gate:
                 budget.requests -= 1
+                self._reserved_requests -= 1
                 for held in claimed:
                     held.release_probe()
             raise
@@ -882,6 +894,9 @@ class HttpClient:
             response = await self._client.send(request, stream=True)
             if not response.is_redirect:
                 return response
+            if not self._allow_redirects:
+                await response.aclose()
+                raise RedirectNotAllowedError("Stage refused a single-posting endpoint redirect")
             location = response.headers.get("location")
             if not location:
                 return response

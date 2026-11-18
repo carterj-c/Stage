@@ -197,6 +197,7 @@ class NegarFeed(_GitHubMarkdownFeed):
 @register_feed
 class HanziliFeed(_GitHubMarkdownFeed):
     name: ClassVar[str] = "hanzili"
+    description_is_summary: ClassVar[bool] = True
 
     def plan(self, now: datetime) -> tuple[str, ...]:
         return (
