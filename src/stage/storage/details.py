@@ -48,7 +48,7 @@ _QUEUED = (
 _AWAITING = (
     "FROM quarantine q LEFT JOIN detail_fetches d ON d.id = q.id "
     "WHERE q.source = ? AND (q.matched_phrase GLOB ? OR "
-    "(q.source IN ('workday', 'smartrecruiters') "
+    "(q.source IN ('workday', 'smartrecruiters', 'bamboohr') "
     "AND q.reason IN (?, ?, ?, ?, ?, ?))) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
     "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)))"

@@ -104,7 +104,6 @@ class BambooHrAdapter(BoardAdapter):
             posting = job.id.removeprefix(prefix)
             if not re.fullmatch(r"[1-9][0-9]*", posting):
                 continue
-            # Only validated board names and numeric listing ids enter the URL.
             url = f"https://{self.host_for(company)}/careers/{posting}"
             try:
                 detail = await client.get_json(f"{url}/detail", revalidate=True)
@@ -147,6 +146,6 @@ def _description(payload: Any, job: Job, url: str) -> str:
     body = opening.get("description")
     if not isinstance(title, str) or collapse_whitespace(title) != job.title_raw:
         return ""
-    if opening.get("jobOpeningShareUrl", url) != url or not isinstance(body, str):
+    if opening.get("jobOpeningShareUrl") != url or not isinstance(body, str):
         return ""
     return strip_html(body)

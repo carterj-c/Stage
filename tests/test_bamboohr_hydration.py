@@ -12,7 +12,17 @@ import pytest
 import respx
 from bs4 import BeautifulSoup
 
-from stage.domain import Company, DetailFetch, JobFilters, Platform, RoleCategory, job_id
+from stage.classify.scope import Rejection, to_quarantined
+from stage.domain import (
+    Company,
+    DetailFetch,
+    JobFilters,
+    Platform,
+    QuarantineFilters,
+    RejectionReason,
+    RoleCategory,
+    job_id,
+)
 from stage.http import (
     BreakerOpenError,
     BucketBlockedError,
@@ -57,8 +67,18 @@ async def _fetch(details: Sequence[str] = (IDENT,), board: Any = BOARD) -> Any:
         return await BambooHrAdapter().fetch(COMPANY, client, NOW, details=details)
 
 
-def _detail(body: str, title: str = "Quality Assurance Analyst") -> dict[str, Any]:
-    return {"result": {"jobOpening": {"jobOpeningName": title, "description": body}}}
+def _detail(
+    body: str, title: str = "Quality Assurance Analyst", url: str = f"{BASE}/884"
+) -> dict[str, Any]:
+    return {
+        "result": {
+            "jobOpening": {
+                "jobOpeningName": title,
+                "description": body,
+                "jobOpeningShareUrl": url,
+            }
+        }
+    }
 
 
 @respx.mock
@@ -102,6 +122,15 @@ async def test_full_live_body_preserves_every_section_and_tail() -> None:
         _detail("<p><br>&nbsp;</p>"),
         _detail("<script>tracking()</script><style>p{color:red}</style>"),
         _detail("Body", title="Wrong job"),
+        {
+            "result": {
+                "jobOpening": {
+                    "jobOpeningName": "Quality Assurance Analyst",
+                    "description": "Wrong job, same title",
+                }
+            }
+        },
+        _detail("Wrong job, same title", url=f"{BASE}/999"),
         _detail("Body") | {"result": {"jobOpening": {"description": "Body"}}},
         _detail("Body")
         | {
@@ -263,14 +292,19 @@ async def test_multiple_boards_share_budget_rescreen_and_preserve_later_bodies(
     for company in companies:
         respx.get(f"https://{company.slug}.bamboohr.com/careers/list").respond(200, json=board)
     body = "Build software. Must be a US citizen. Requirements: Python. End of full posting."
-    detail = respx.get(
-        url__regex=r"https://(acme|beta)\.bamboohr\.com/careers/[12]/detail"
-    ).respond(200, json=_detail(body, title))
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=_detail(body, title, str(request.url).removesuffix("/detail"))
+        )
+
+    detail = respx.get(url__regex=r"https://(acme|beta)\.bamboohr\.com/careers/[12]/detail").mock(
+        side_effect=reply
+    )
     async with open_repository(db_path) as repo:
         raw = tuple(j for c in companies for j in BambooHrAdapter().result(c, board, NOW).jobs)
         kept, rejected = normalize_batch(raw)
         assert not rejected
-        # Known term, role and authorization must not exclude missing bodies from the queue.
         kept = tuple(replace(j, work_auth_flag=False) for j in kept)
         assert all(j.role is RoleCategory.SWE and j.term == "summer-2027" for j in kept)
         await repo.apply_source_batch(SourceBatch(source="bamboohr", run_started_at=NOW, jobs=kept))
@@ -345,3 +379,81 @@ async def test_hydration_does_not_make_partial_listing_authoritative() -> None:
     assert not result.authoritative and result.degraded
     assert result.jobs[0].description
     assert result.detail_fetches == (DetailFetch(id=IDENT, resolved=True),)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        RejectionReason.OUT_OF_SCOPE_DEGREE,
+        RejectionReason.NOT_EARLY_CAREER,
+        RejectionReason.NOT_AN_INTERNSHIP,
+        RejectionReason.NOT_A_CS_ROLE,
+        RejectionReason.UNKNOWN_CS_ROLE,
+        RejectionReason.OUT_OF_SCOPE_LOCATION,
+    ],
+)
+async def test_quarantined_bamboo_jobs_with_eligible_reasons_are_queued(
+    db_path: Path, reason: RejectionReason
+) -> None:
+    job = BambooHrAdapter().result(COMPANY, BOARD, NOW).jobs[0]
+    held = to_quarantined(job, Rejection(reason, "title-only rejection"))
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(source="bamboohr", run_started_at=NOW, quarantined=(held,))
+        )
+        assert await repo.detail_queue("bamboohr", 10) == [job.id]
+
+
+@respx.mock
+async def test_quarantined_job_requires_fresh_verified_body_before_restoration(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sync_module, "get_feeds", dict)
+    monkeypatch.setattr(sync_module, "resolve", lambda *_, **__: UNPACED)
+    title = "Summer 2027 Software Engineer Intern"
+    board = {
+        "result": [
+            {
+                "id": 884,
+                "jobOpeningName": title,
+                "location": {"city": "Toronto", "country": "Canada"},
+            }
+        ]
+    }
+    job = BambooHrAdapter().result(COMPANY, board, NOW).jobs[0]
+    held = to_quarantined(job, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "PhD required"))
+    respx.get(f"{BASE}/list").respond(200, json=board)
+    body = "Build Python software. Bachelor's degree students welcome."
+    no_identity = {"result": {"jobOpening": {"jobOpeningName": title, "description": body}}}
+    route = respx.get(f"{BASE}/884/detail").respond(200, json=no_identity)
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(source="bamboohr", run_started_at=NOW, quarantined=(held,))
+        )
+        for day in range(1, 4):
+            if day == 2:
+                route.respond(200, json=_detail(body, title))
+            when = NOW + timedelta(days=day)
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [COMPANY],
+                    sources=["bamboohr"],
+                    force_refresh=True,
+                    now_fn=_at(when),
+                    still_open=False,
+                )
+            ]
+            saved = await repo.get_job(job.id)
+            quarantined = await repo.list_quarantined(QuarantineFilters(limit=None))
+            if day == 1:
+                assert saved is None
+                assert [entry.id for entry in quarantined] == [job.id]
+                assert await repo.detail_queue("bamboohr", 10) == [job.id]
+            else:
+                assert saved is not None and saved.description == body
+                assert saved.role is RoleCategory.SWE
+                assert not quarantined
+                assert await repo.detail_queue("bamboohr", 10) == []
+        assert route.call_count == 2
