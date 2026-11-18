@@ -249,6 +249,15 @@ async def test_empty_optional_workable_sections_are_explicitly_valid() -> None:
     assert result is not None and result.complete
 
 
+async def test_ashby_accepts_documented_posting_without_id() -> None:
+    job = posting("ashby")
+    del job["id"]
+    async with client_for(httpx.Response(200, json={"jobs": [job]})) as client:
+        result = await fetch_target(target("ashby"), client)
+    assert result is not None and result.complete
+    assert result.description == job["descriptionPlain"]
+
+
 async def test_ashby_host_policy_is_api_only() -> None:
     assert target("ashby").hosts == frozenset({"api.ashbyhq.com"})
     assert "api.ashbyhq.com" in HOSTS
@@ -298,7 +307,8 @@ async def test_ashby_respects_response_size_bound() -> None:
 
 
 async def test_ashby_selects_exact_job_from_board_and_claims_full() -> None:
-    other = posting("ashby") | {"id": "11111111-1111-1111-1111-111111111111"}
+    other_id = "11111111-1111-1111-1111-111111111111"
+    other = posting("ashby") | {"id": other_id, "jobUrl": URLS["ashby"].replace(UUID, other_id)}
     requests: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -361,7 +371,7 @@ async def test_ashby_rejects_missing_malformed_or_duplicate_board(payload: objec
         assert await fetch_target(target("ashby"), client) is None
 
 
-@pytest.mark.parametrize("field", ["id", "jobUrl", "title", "isListed"])
+@pytest.mark.parametrize("field", ["jobUrl", "title", "isListed"])
 async def test_ashby_requires_identity_and_listing_fields(field: str) -> None:
     job = posting("ashby")
     del job[field]
