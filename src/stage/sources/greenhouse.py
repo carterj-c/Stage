@@ -81,9 +81,15 @@ class GreenhouseAdapter(BoardAdapter):
         if response.not_modified:
             return FetchResult(not_modified=True)
         result = await self.built(company, response, now)
+        count = len(result.jobs)
+        label = "posting" if count == 1 else "postings"
         return replace(
             result,
-            degraded=sentences(TOO_LARGE, result.degraded),
+            degraded=sentences(
+                TOO_LARGE,
+                f"{count:,} {label} returned without descriptions",
+                result.degraded,
+            ),
             stale_urls=(f"{url}?content=false",),
         )
 

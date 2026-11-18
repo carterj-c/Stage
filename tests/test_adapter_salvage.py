@@ -81,7 +81,7 @@ async def test_a_board_over_the_size_cap_is_refetched_without_descriptions() -> 
     assert [job.title_raw for job in result.jobs] == ["Software Intern"], (
         "the fallback listing lost its postings"
     )
-    assert "without descriptions" in result.degraded, "the reduced fetch was not reported"
+    assert "1 posting returned without descriptions" in result.degraded
 
 
 @respx.mock
