@@ -206,7 +206,16 @@ _FETCHED_AGAIN = (
     "attempts = detail_fetches.attempts + 1",
     "failed = excluded.failed",
 )
-UPSERT_DETAIL = upsert("detail_fetches", _FETCH_COLUMNS, "id", _FETCHED_AGAIN)
+_DETAIL_AGAIN = (
+    *refreshed("fetched_at", "resolved"),
+    "attempts = CASE WHEN (EXISTS (SELECT 1 FROM quarantine q WHERE q.id = detail_fetches.id) "
+    "OR EXISTS (SELECT 1 FROM jobs j WHERE j.id = detail_fetches.id)) "
+    "AND detail_fetches.fetched_at < "
+    "(SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed') "
+    "THEN 1 ELSE detail_fetches.attempts + 1 END",
+    "failed = excluded.failed",
+)
+UPSERT_DETAIL = upsert("detail_fetches", _FETCH_COLUMNS, "id", _DETAIL_AGAIN)
 UPSERT_HEIR = upsert("detail_fetches", _FETCH_COLUMNS, "id", refreshed("source", "fetched_at"))
 UPSERT_CHECK = (
     f"INSERT INTO detail_fetches ({', '.join(_FETCH_COLUMNS)}) "

@@ -1071,7 +1071,7 @@ def test_open_accepts_several_rows() -> None:
     assert "list" in str(annotation)
 
 
-def test_show_hides_fields_the_posting_never_stated() -> None:
+def test_show_hides_unstated_term_and_displays_unknown_degree() -> None:
     import io
 
     from rich.console import Console
@@ -1085,7 +1085,7 @@ def test_show_hides_fields_the_posting_never_stated() -> None:
     output = buffer.getvalue()
 
     assert "term" not in output
-    assert "degree" not in output
+    assert "degree" in output and "unknown" in output
 
 
 def test_show_puts_the_identifier_last() -> None:

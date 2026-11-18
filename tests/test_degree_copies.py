@@ -245,3 +245,23 @@ def test_a_list_copy_with_a_different_link_and_extra_words_is_still_found(
 
     assert COPY not in jobs and held[COPY].startswith("copy of greenhouse:acme:8046795003 ")
     repository.close()
+
+
+def test_restored_descriptionless_copy_keeps_unknown_authorization_after_promotion(
+    db_path: Path,
+) -> None:
+    repository = _linked(db_path)
+    later, latest = NOW + timedelta(hours=1), NOW + timedelta(hours=2)
+    repository.apply_source_batch(_screened("greenhouse", [_board(DOCTORAL, later)], later))
+    repository.apply_source_batch(_screened("greenhouse", [_board(OPEN_TO_ALL, latest)], latest))
+    restored = repository.get_job(COPY)
+    assert restored is not None and restored.duplicate_of == _board().id
+    assert restored.work_auth_flag is None
+    after = latest + timedelta(hours=1)
+    repository.apply_source_batch(
+        SourceBatch(source="greenhouse", run_started_at=after, closes_whole_source=True)
+    )
+    promoted = repository.get_job(COPY)
+    assert promoted is not None and promoted.duplicate_of is None
+    assert promoted.work_auth_flag is None
+    repository.close()

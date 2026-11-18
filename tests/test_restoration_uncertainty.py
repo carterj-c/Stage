@@ -158,7 +158,7 @@ async def test_raw_descriptionless_refresh_cannot_fabricate_auth_status(tmp_path
 @pytest.mark.parametrize(
     "reason", [RejectionReason.NOT_EARLY_CAREER, RejectionReason.OUT_OF_SCOPE_LOCATION]
 )
-async def test_fresh_nonintern_legacy_prefilter_rejection_restores_with_unknown_evidence(
+async def test_fresh_nonintern_legacy_prefilter_rejection_waits_for_description(
     tmp_path: Path,
     title: str,
     reason: RejectionReason,
@@ -173,9 +173,7 @@ async def test_fresh_nonintern_legacy_prefilter_rejection_restores_with_unknown_
         assert len(kept) == 1 and not rejected
         await repo.apply_source_batch(SourceBatch(source=job.source, run_started_at=NOW, jobs=kept))
         restored = await repo.get_job(job.id)
-        assert restored is not None
-        assert restored.degree_requirement is DegreeRequirement.UNKNOWN
-        assert restored.work_auth_flag is None
+        assert restored is None
 
 
 @pytest.mark.parametrize(

@@ -153,6 +153,15 @@ async def test_a_quarantined_posting_past_the_window_is_still_released(db_path: 
         await repository.apply_source_batch(
             SourceBatch(source="greenhouse", run_started_at=NOW, jobs=(job("row", seen=NOW),))
         )
+        assert await repository.get_job("row") is None
+        assert (await repository.list_quarantined(QuarantineFilters()))[0].first_seen == original
+        await repository.apply_source_batch(
+            SourceBatch(
+                source="greenhouse",
+                run_started_at=NOW,
+                jobs=(dataclasses.replace(job("row", seen=NOW), description="Fresh job details."),),
+            )
+        )
         released = await repository.get_job("row")
         assert released is not None
         assert released.first_seen == original
@@ -660,3 +669,36 @@ async def test_a_list_copy_of_a_recently_purged_posting_still_arrives(db_path: P
         stored = await repository.get_job(copy.id)
 
     assert stored is not None, "only the 14-day window retires a posting for good"
+
+
+async def test_safe_rescreen_release_keeps_original_tombstone_first_seen(db_path: Path) -> None:
+    from stage.services.maintenance import rescreen
+
+    original = NOW - timedelta(days=20)
+    title = "Quantitative Research Intern"
+    async with open_repository(db_path) as repository:
+        await repository.apply_source_batch(
+            SourceBatch(
+                source="greenhouse",
+                run_started_at=NOW,
+                jobs=(job("row", seen=original, title=title),),
+            )
+        )
+        assert (await repository.purge(NOW)).tombstoned == 1
+        entry = to_quarantined(
+            job("row", seen=NOW, title=title),
+            Rejection(RejectionReason.UNKNOWN_CS_ROLE, "old role"),
+        )
+        await repository.apply_source_batch(
+            SourceBatch(
+                source="greenhouse",
+                run_started_at=NOW,
+                quarantined=(entry,),
+            )
+        )
+        result = await rescreen(repository, now=NOW)
+        assert result.released == 1
+        restored = await repository.get_job("row")
+        assert restored is not None and restored.first_seen == original
+        assert restored.work_auth_flag is None
+        assert await repository.count_quarantined(QuarantineFilters()) == 0

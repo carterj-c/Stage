@@ -13,17 +13,14 @@ from stage.domain import (
     REPOST,
     UNKNOWN_TERM,
     Job,
-    JobLevel,
     JobStatus,
     LocationBucket,
     QuarantinedJob,
-    RejectionReason,
     RoleCategory,
     board_of,
 )
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
 from stage.domain.text import is_workday_opening
-from stage.lexicon import occupation_lexicon
 from stage.storage.copies import (
     copies_of_rejected,
     duplicate_candidates,
@@ -440,6 +437,8 @@ class BatchWriter(Store):
         return sum(1 for ident, linked in after.items() if before.get(ident) != linked)
 
     def apply_source_batch(self, batch: SourceBatch) -> SourceBatchResult:
+        from stage.lexicon import occupation_lexicon
+
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
@@ -466,15 +465,7 @@ class BatchWriter(Store):
                     (listed(j.id for j in without_description),),
                 )
             }
-            held_without_body = {
-                job.id
-                for job in without_description
-                if job.id in old_reasons
-                and (
-                    job.level in (JobLevel.INTERNSHIP, JobLevel.UNKNOWN)
-                    or old_reasons[job.id] == RejectionReason.OUT_OF_SCOPE_DEGREE.value
-                )
-            }
+            held_without_body = {job.id for job in without_description if job.id in old_reasons}
             conn.executemany(
                 "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
                 [

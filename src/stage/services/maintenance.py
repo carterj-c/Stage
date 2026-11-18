@@ -176,6 +176,7 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
         if not changed_this_pass:
             complete = True
             break
+    released, relabelled = await _reclassify_quarantine(repository, moment)
     relocated = await repository.refresh_quarantine_locations(_place_resolver())
     relinked = await repository.relink_duplicates(resolve_duplicates, canonical_apply_url)
     waiting = await repository.count_quarantined(QuarantineFilters())
@@ -186,11 +187,75 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
         quarantined=quarantined,
         total=total,
         updated=updated,
+        released=released,
+        relabelled=relabelled,
         relocated=relocated,
         relinked=relinked,
         quarantine_waiting=waiting,
         complete=complete,
     )
+
+
+async def _reclassify_quarantine(repository: AsyncRepository, moment: datetime) -> tuple[int, int]:
+    from stage.domain import RejectionReason, SourceSignals
+    from stage.lexicon import fold, occupation_lexicon
+    from stage.services.screening import normalize_batch
+
+    released = 0
+    relabelled = 0
+    after_id = ""
+    while entries := await repository.list_rescreen_quarantine(after_id, RESCREEN_LIMIT):
+        after_id = entries[-1].id
+        candidates = tuple(
+            Job(
+                id=entry.id,
+                source=entry.source,
+                company=entry.company,
+                title_raw=entry.title_raw,
+                title_normalized=fold(entry.title_raw),
+                apply_url_raw=entry.apply_url_raw,
+                description="",
+                first_seen=entry.first_seen,
+                last_seen=entry.last_seen,
+                location_raw=entry.location_raw,
+                location=entry.location,
+                remote_scope=entry.remote_scope,
+                signals=SourceSignals(
+                    employment_type=entry.employment_type, category=entry.category
+                ),
+            )
+            for entry in entries
+            if entry.reason is not RejectionReason.OUT_OF_SCOPE_DEGREE
+        )
+        kept, rejected = normalize_batch(candidates)
+        previous = {entry.id: entry for entry in entries}
+        relabelled += await repository.relabel_quarantine(
+            tuple(
+                entry
+                for entry in rejected
+                if (entry.reason, entry.matched_phrase)
+                != (previous[entry.id].reason, previous[entry.id].matched_phrase)
+            )
+        )
+        safe = tuple(
+            job
+            for job in kept
+            if any(
+                role is RoleCategory.QUANT or role.value in occupation_lexicon()
+                for role in (job.role, *job.roles)
+            )
+        )
+        for source in sorted({job.source for job in safe}):
+            applied = await repository.apply_source_batch(
+                SourceBatch(
+                    source=source,
+                    run_started_at=moment,
+                    jobs=tuple(job for job in safe if job.source == source),
+                    resolve_duplicates=resolve_duplicates,
+                )
+            )
+            released += applied.added
+    return released, relabelled
 
 
 def _current_term(job: Job) -> str:

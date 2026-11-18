@@ -78,7 +78,7 @@ async def test_rescreen_paginates_all_stored_rows_and_reports_quarantine_separat
     monkeypatch.setattr(maintenance, "RESCREEN_LIMIT", 2)
     jobs = tuple(posting(f"greenhouse:acme:{i}", "Software Engineer Intern") for i in range(5))
     held = to_quarantined(
-        posting("greenhouse:acme:held", "Financial Analyst"),
+        posting("greenhouse:acme:held", "Software Engineer"),
         Rejection(RejectionReason.NOT_EARLY_CAREER, "old"),
     )
     async with open_repository(tmp_path / "pages.db") as repo:
@@ -182,8 +182,6 @@ async def test_descriptionless_quant_feed_refresh_preserves_unknown_evidence(
         await repo.apply_source_batch(
             SourceBatch(source=source, run_started_at=NOW, quarantined=(held,))
         )
-        result = await maintenance.rescreen(repo, now=NOW)
-        assert result.quarantine_waiting == 1
         kept, rejected = normalize_batch([job])
         assert len(kept) == 1 and not rejected
         await repo.apply_source_batch(SourceBatch(source=source, run_started_at=NOW, jobs=kept))
@@ -207,6 +205,7 @@ async def test_rescreen_pages_beyond_100000_without_hiding_held_rows(
     repo = AsyncMock(spec=AsyncRepository)
     repo.count_jobs.return_value = total
     repo.count_quarantined.return_value = total
+    repo.list_rescreen_quarantine.return_value = []
     repo.refresh_quarantine_locations.return_value = 0
     repo.relink_duplicates.return_value = 0
     visited: list[int] = []

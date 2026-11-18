@@ -87,6 +87,7 @@ def as_job(entry: QuarantinedJob, duplicate_of: str | None = None) -> Job:
         apply_url_raw=entry.apply_url_raw,
         apply_url_canonical=canonical(entry.apply_url_raw),
         description="",
+        work_auth_flag=None,
         first_seen=entry.first_seen,
         last_seen=entry.last_seen,
         location_raw=entry.location_raw,

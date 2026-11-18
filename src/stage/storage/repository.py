@@ -120,6 +120,9 @@ class Repository(Protocol):
     def list_rescreen_jobs(self, after_id: str, limit: int) -> list[Job]:
         pass
 
+    def list_rescreen_quarantine(self, after_id: str, limit: int) -> list[QuarantinedJob]:
+        pass
+
     def list_quarantined(self, filters: QuarantineFilters) -> list[QuarantinedJob]:
         pass
 

@@ -726,3 +726,19 @@ async def test_a_picker_on_a_short_terminal_does_not_squeeze_the_screen(tmp_path
         squeezed = (app.screen.show_vertical_scrollbar, table.max_scroll_x)
 
     assert chips > 2 and squeezed == (False, 0)
+
+
+async def test_posting_details_display_unknown_degree_and_authorization(tmp_path: Path) -> None:
+    import sqlite3
+    from contextlib import closing
+
+    path = _seed(tmp_path / "unknown.db", count=1)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("UPDATE jobs SET degree_requirement = 'unknown', work_auth_known = 0")
+    app = StageApp(path, "")
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _postings(app, pilot)
+        screen._show_detail()
+        detail = _text(screen.query_one("#detail", Static))
+    assert "degree: unknown" in detail
+    assert "work auth: unknown" in detail

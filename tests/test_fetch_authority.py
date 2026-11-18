@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -206,10 +207,19 @@ async def test_first_seen_survives_the_jobs_to_quarantine_direction(db_path: Pat
         assert held[0].first_seen == original, "quarantine must not stamp today's date"
 
         await repository.apply_source_batch(
+            SourceBatch(source="greenhouse", run_started_at=later, jobs=(job(later),))
+        )
+        assert await repository.get_job("acme-1") is None
+        assert (
+            await repository.list_quarantined(
+                __import__("stage.domain", fromlist=["QuarantineFilters"]).QuarantineFilters()
+            )
+        )[0].first_seen == original
+        await repository.apply_source_batch(
             SourceBatch(
                 source="greenhouse",
                 run_started_at=later + timedelta(days=1),
-                jobs=(job(later + timedelta(days=1)),),
+                jobs=(replace(job(later + timedelta(days=1)), description="Fresh job details."),),
             )
         )
         restored = await repository.get_job("acme-1")
