@@ -262,17 +262,38 @@ async def test_failed_endpoints_have_bounded_attempts_and_cooldown(
 
 
 @respx.mock
-async def test_unsupported_and_ashby_never_resolve_or_fetch(db_path: Path) -> None:
+async def test_unsupported_never_resolves_or_fetches(db_path: Path) -> None:
     async with open_repository(db_path) as repo:
-        await seed(
-            repo,
-            replace(job(), apply_url_raw="https://evil.test/job"),
-            replace(job(124), apply_url_raw=f"https://jobs.ashbyhq.com/acme/{LEVER_ID}"),
-        )
+        await seed(repo, replace(job(), apply_url_raw="https://evil.test/job"))
         result = await hydrate(repo)
     assert not result.requests
     assert attempt(db_path) == (0, 1, 1)
-    assert attempt(db_path, 124) == (0, 1, 1)
+
+
+@respx.mock
+async def test_ashby_feed_link_hydrates_exact_board_posting(db_path: Path) -> None:
+    url = f"https://jobs.ashbyhq.com/acme/{LEVER_ID}"
+    respx.get("https://api.ashbyhq.com/posting-api/job-board/acme").respond(
+        200,
+        json={
+            "jobs": [
+                {
+                    "id": LEVER_ID,
+                    "jobUrl": url,
+                    "title": "Software Engineer Intern",
+                    "isListed": True,
+                    "descriptionPlain": "Build software systems.",
+                }
+            ]
+        },
+    )
+    async with open_repository(db_path) as repo:
+        await seed(repo, replace(job(), apply_url_raw=url))
+        result = await hydrate(repo)
+        stored = await repo.get_job(job().id)
+    assert len(result.requests) == 1
+    assert stored is not None and stored.description == "Build software systems."
+    assert attempt(db_path) == (1, 0, 1)
 
 
 @respx.mock

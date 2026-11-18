@@ -1129,7 +1129,6 @@ async def _persist_source_batch(
                 and not candidate.signals.degrees
                 and item.reason in {RejectionReason.UNKNOWN_CS_ROLE, RejectionReason.NOT_A_CS_ROLE}
                 and target is not None
-                and target.provider != "ashby"
                 and probe is not None
                 and probe.reason is RejectionReason.UNKNOWN_CS_ROLE
                 and probe.matched_phrase.endswith(AWAITING_PAGE)

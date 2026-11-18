@@ -126,15 +126,12 @@ def _ashby_detail(target: HydrationTarget, data: dict[str, object]) -> Hydration
     jobs = data.get("jobs")
     if not isinstance(jobs, list):
         return None
-    # Count by UUID before validating the row so a malformed duplicate cannot
-    # silently turn an ambiguous response into a unique match.
     matches = [job for job in jobs if isinstance(job, dict) and job.get("id") == target.posting_id]
     if len(matches) != 1:
         return None
     job = matches[0]
     if target_for_url(job.get("jobUrl")) != target or not _has_text(job.get("title")):
         return None
-    # Unlisted or missing jobs are inconclusive, never evidence of closure.
     if job.get("isListed") is not True:
         return None
     plain = job.get("descriptionPlain")

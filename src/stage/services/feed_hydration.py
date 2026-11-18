@@ -80,7 +80,7 @@ async def hydrate_feeds(
         ("greenhouse", "boards-api.greenhouse.io"),
         ("lever", "api.lever.co"),
         ("workable", "apply.workable.com"),
-        ("ashby", "jobs.ashbyhq.com"),
+        ("ashby", "api.ashbyhq.com"),
     ):
         posture = resolve(get_adapter(provider).rate_profile, [])
         bucket = host_buckets[host]
@@ -116,7 +116,7 @@ async def hydrate_feeds(
                 break
             target = target_for_url(job.apply_url_raw)
             detail = None
-            if target is not None and target.provider != "ashby":
+            if target is not None:
                 host = next(iter(target.hosts))
                 if host in blocked:
                     continue
