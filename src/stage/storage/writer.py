@@ -124,6 +124,9 @@ class AsyncRepository:
     async def detail_queue_size(self, source: str) -> int:
         return await self._writer.run(lambda repository: repository.detail_queue_size(source))
 
+    async def verified_feed_jobs(self, ids: Collection[str]) -> list[Job]:
+        return await self._writer.run(lambda repository: repository.verified_feed_jobs(ids))
+
     async def stored_details(self, ids: Collection[str]) -> dict[str, tuple[str, str]]:
         return await self._writer.run(lambda repository: repository.stored_details(ids))
 

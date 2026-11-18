@@ -135,6 +135,11 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
         if not pass_number:
             examined = len(stored)
         pending = [job for job in stored if settled.get(job.id) != job]
+        protected = (
+            {entry.id for entry in await repository.verified_feed_jobs([job.id for job in pending])}
+            if pending
+            else set()
+        )
         candidates, rejected = _reclassifications(pending) if pending else ((), ())
         rejected_ids = {entry.id for entry in rejected}
         changed: list[Job] = []
@@ -154,6 +159,12 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
                     run_started_at=moment,
                     jobs=tuple(entry for entry in updates if entry.source == source),
                     quarantined=tuple(entry for entry in rejected if entry.source == source),
+                    rejection_expected=tuple(
+                        entry
+                        for entry in pending
+                        if entry.source == source and entry.id in protected
+                    ),
+                    rejection_screened=tuple(entry for entry in pending if entry.source == source),
                 )
             )
             if applied.successors:

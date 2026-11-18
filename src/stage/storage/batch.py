@@ -485,6 +485,47 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
     )
 
 
+def _protect_screened_feed_rejections(
+    conn: sqlite3.Connection, batch: SourceBatch
+) -> tuple[SourceBatch, tuple[str, ...]]:
+    if batch.rejection_expected is None or not batch.quarantined:
+        return batch, ()
+    expected = {job.id: job for job in batch.rejection_expected}
+    screened = {job.id: job for job in batch.rejection_screened}
+    verified: list[str] = []
+    blocked: set[str] = set()
+    for entry in batch.quarantined:
+        row = conn.execute(
+            "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = ? || j.id "
+            "JOIN detail_fetches f ON f.id = ? || j.id "
+            "WHERE j.id = ? AND j.description <> '' AND d.resolved = 1 AND d.failed = 0 "
+            "AND f.resolved = 1 AND f.failed = 0",
+            (FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, entry.id),
+        ).fetchone()
+        if row is None and entry.id not in expected:
+            continue
+        current = job_from(row) if row is not None else None
+        original, read = expected.get(entry.id), screened.get(entry.id)
+        if (
+            current is None
+            or original != current
+            or read is None
+            or not read.description
+            or read.description != current.description
+        ):
+            blocked.add(entry.id)
+        else:
+            verified.append(entry.id)
+    if blocked:
+        batch = replace(
+            batch,
+            quarantined=tuple(entry for entry in batch.quarantined if entry.id not in blocked),
+            closable_boards=(),
+            closes_whole_source=False,
+        )
+    return batch, tuple(verified)
+
+
 class BatchWriter(Store):
     def relink_duplicates(self, resolve: Resolver, canonical: Callable[[str], str]) -> int:
         with self._transaction() as conn:
@@ -518,6 +559,7 @@ class BatchWriter(Store):
         stamp = to_text(started)
         with self._transaction() as conn:
             batch = _hold_feed_rejections(conn, _guard_hydration(conn, batch))
+            batch, verified_rejections = _protect_screened_feed_rejections(conn, batch)
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
             known = _first_seen(seen, started)
@@ -535,6 +577,13 @@ class BatchWriter(Store):
             jobs, diverted = copies_of_rejected(conn, batch, jobs)
             conn.executemany(UPSERT_JOB, [job_params(job) for job in jobs])
             quarantined, heirs = _reject(conn, batch, batch.quarantined + diverted, known, stamp)
+            conn.executemany(
+                UPSERT_DETAIL,
+                [
+                    (FEED_REJECTION_PREFIX + ident, batch.source, stamp, 1, 1, 0)
+                    for ident in verified_rejections
+                ],
+            )
             conn.execute(
                 f"DELETE FROM quarantine WHERE id IN {EACH}",
                 (listed(job.id for job in jobs if seen.get(job.id, _UNSEEN).rejected is not None),),

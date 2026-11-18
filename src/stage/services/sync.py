@@ -967,10 +967,22 @@ async def _persist_source_batch(
     repository: AsyncRepository, screener: Screener, batch: SourceBatch, collected: Sequence[Job]
 ) -> tuple[SourceBatchResult, float, float]:
     normalize_clock = time.perf_counter()
-    kept, rejected = await screener(await _with_stored_details(repository, collected))
+    expected = (
+        await repository.verified_feed_jobs([job.id for job in collected]) if collected else []
+    )
+    screened = await _with_stored_details(repository, collected)
+    kept, rejected = await screener(screened)
     normalize_ms = _since(normalize_clock)
     write_clock = time.perf_counter()
-    counts = await repository.apply_source_batch(replace(batch, jobs=kept, quarantined=rejected))
+    counts = await repository.apply_source_batch(
+        replace(
+            batch,
+            jobs=kept,
+            quarantined=rejected,
+            rejection_expected=tuple(expected),
+            rejection_screened=tuple(screened),
+        )
+    )
     if counts.successors:
         from stage.services.tracker import follow_recorded
 

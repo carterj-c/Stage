@@ -70,6 +70,8 @@ class SourceBatch:
     closes_whole_source: bool = False
     list_sources: frozenset[str] = frozenset()
     hydration_expected: tuple[Job, ...] | None = None
+    rejection_expected: tuple[Job, ...] | None = None
+    rejection_screened: tuple[Job, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +113,9 @@ class Repository(Protocol):
         pass
 
     def detail_queue_size(self, source: str) -> int:
+        pass
+
+    def verified_feed_jobs(self, ids: Collection[str]) -> list[Job]:
         pass
 
     def stored_details(self, ids: Collection[str]) -> dict[str, tuple[str, str]]:

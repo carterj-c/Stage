@@ -1,5 +1,6 @@
 import random
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -946,3 +947,131 @@ async def test_accepted_hydration_is_not_later_mistaken_for_a_verified_rejection
         await seed(repo, job())
         assert await repo.get_job(job().id) is not None
         assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+
+
+@respx.mock
+@pytest.mark.parametrize("path", ["refresh", "rescreen"])
+async def test_later_screening_rejection_preserves_verified_body_hold(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    from stage.classify.scope import Rejection, to_quarantined
+    from stage.domain import RejectionReason
+    from stage.domain.quarantine import QuarantinedJob as _QuarantinedJob
+    from stage.services import maintenance
+    from stage.services.screening import normalize_batch
+
+    respx.get(FEED_URL).respond(200, json={})
+    route = respx.get(GH + "123").respond(200, json=payload())
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        hydrated = await repo.get_job(job().id)
+        assert hydrated is not None and hydrated.description
+        assert rejection_marker(db_path) is None
+        original = normalize_batch
+
+        def reject_body(jobs: Sequence[Job]) -> tuple[tuple[Job, ...], tuple[_QuarantinedJob, ...]]:
+            kept, rejected = original(jobs)
+            return (), rejected + tuple(
+                to_quarantined(entry, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "new rule"))
+                for entry in kept
+            )
+
+        if path == "refresh":
+            monkeypatch.setattr("stage.services.screening.normalize_batch", reject_body)
+            await sync(repo, NOW + timedelta(hours=6))
+            monkeypatch.setattr("stage.services.screening.normalize_batch", original)
+        else:
+            original_reclassifications = maintenance._reclassifications
+
+            def rules_reject(
+                jobs: Sequence[Job],
+            ) -> tuple[tuple[Job, ...], tuple[_QuarantinedJob, ...]]:
+                candidates, rejected = original_reclassifications(jobs)
+                return candidates, rejected + tuple(
+                    to_quarantined(
+                        entry, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "new rule")
+                    )
+                    for entry in candidates
+                )
+
+            monkeypatch.setattr(maintenance, "_reclassifications", rules_reject)
+            await maintenance.rescreen(repo, now=NOW + timedelta(hours=6))
+            monkeypatch.setattr(maintenance, "_reclassifications", original_reclassifications)
+        assert await repo.get_job(job().id) is None
+        assert rejection_marker(db_path) == (1, 0)
+        await sync(repo, NOW + timedelta(hours=12))
+        assert await repo.get_job(job().id) is None
+        assert len(await repo.list_quarantined(QuarantineFilters(source="test-feed"))) == 1
+        assert (await repo.purge(NOW + timedelta(days=100))).forgotten == 0
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("path", ["refresh", "rescreen"])
+async def test_later_rejection_does_not_override_concurrent_body_or_close_it(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    from stage.classify.scope import Rejection, to_quarantined
+    from stage.domain import RejectionReason
+    from stage.services import maintenance
+    from stage.services.screening import normalize_batch
+
+    respx.get(FEED_URL).respond(200, json={})
+    respx.get(GH + "123").respond(200, json=payload())
+    changed = False
+
+    def update_after_snapshot() -> None:
+        nonlocal changed
+        if not changed:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE jobs SET description = ?, title_raw = ? WHERE id = ?",
+                    ("Fresher description", "Updated software intern", job().id),
+                )
+            changed = True
+
+    async with open_repository(db_path) as repo:
+        await sync(repo)
+        if path == "refresh":
+
+            def screen(jobs: Sequence[Job]) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+                kept, rejected = normalize_batch(jobs)
+                update_after_snapshot()
+                return (), rejected + tuple(
+                    to_quarantined(
+                        entry, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "new rule")
+                    )
+                    for entry in kept
+                )
+
+            monkeypatch.setattr("stage.services.screening.normalize_batch", screen)
+            await sync(repo, NOW + timedelta(hours=6))
+        else:
+            reclassify = maintenance._reclassifications
+
+            def screen_rules(
+                jobs: Sequence[Job],
+            ) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+                candidates, rejected = reclassify(jobs)
+                if not changed:
+                    update_after_snapshot()
+                    rejected += tuple(
+                        to_quarantined(
+                            entry, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "new rule")
+                        )
+                        for entry in candidates
+                    )
+                return candidates, rejected
+
+            monkeypatch.setattr(maintenance, "_reclassifications", screen_rules)
+            await maintenance.rescreen(repo, now=NOW + timedelta(hours=6))
+        current = await repo.get_job(job().id)
+        assert current is not None and current.description == "Fresher description"
+        assert current.title_raw == "Updated software intern"
+        assert current.status is JobStatus.OPEN
+        assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+        assert rejection_marker(db_path) is None

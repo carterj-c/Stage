@@ -18,7 +18,7 @@ from stage.domain.liveness import (
     LivenessCheck,
 )
 from stage.domain.text import LOCATION_COUNT_GLOB
-from stage.domain.visits import FEED_DETAIL_PREFIX
+from stage.domain.visits import FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX
 from stage.storage.rows import (
     CLOSED,
     OPEN,
@@ -100,6 +100,16 @@ class DetailFetches(Store):
 
     def detail_queue_size(self, source: str) -> int:
         return count(self._conn, f"SELECT COUNT(*) FROM ({_QUEUE})", _queued(source))
+
+    def verified_feed_jobs(self, ids: Collection[str]) -> list[Job]:
+        rows = self._conn.execute(
+            "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = ? || j.id "
+            "JOIN detail_fetches f ON f.id = ? || j.id "
+            f"WHERE j.id IN {EACH} AND j.description <> '' "
+            "AND d.resolved = 1 AND d.failed = 0 AND f.resolved = 1 AND f.failed = 0",
+            (FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, listed(ids)),
+        )
+        return [job_from(row) for row in rows]
 
     def stored_details(self, ids: Collection[str]) -> dict[str, tuple[str, str]]:
         rows = self._conn.execute(
