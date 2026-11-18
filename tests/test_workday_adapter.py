@@ -1782,3 +1782,90 @@ async def test_one_open_crawl_does_not_stop_the_other_boards_being_fetched() -> 
     assert len(fetched) == len(boards), (
         "an open crawl on one board must not turn the whole run into a resume-only pass"
     )
+
+
+@respx.mock
+async def test_degree_quarantine_is_refetched_from_workday_before_release(tmp_path: Path) -> None:
+    from stage.classify.scope import Rejection, to_quarantined
+    from stage.domain import DegreeRequirement, Job, RejectionReason, job_id
+    from stage.services.maintenance import rescreen
+    from stage.services.screening import normalize_batch
+    from stage.storage import SourceBatch, open_repository
+
+    ident = job_id("workday", "cae-career", "R00001")
+    title = "Quantitative Research Intern"
+    job = Job(
+        id=ident,
+        source="workday",
+        company="CAE",
+        title_raw=title,
+        title_normalized=title.lower(),
+        apply_url_raw="https://example.test/1",
+        description="",
+        location_raw="Montreal, QC",
+        first_seen=NOW,
+        last_seen=NOW,
+    )
+    held = to_quarantined(job, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "phd required"))
+    detail = "https://cae.wd3.myworkdayjobs.com/wday/cxs/cae/career/job/Montreal/x_R00001"
+    detail_request = respx.get(detail).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "jobPostingInfo": {"jobDescription": "<p>PhD required. Must be a US citizen.</p>"}
+            },
+        )
+    )
+    respx.post(CXS).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "total": 1,
+                "jobPostings": [
+                    {
+                        "title": title,
+                        "externalPath": "/job/Montreal/x_R00001",
+                        "locationsText": "Montreal",
+                        "bulletFields": ["R00001"],
+                    }
+                ],
+                "facets": _facets(),
+            },
+        )
+    )
+    async with open_repository(tmp_path / "workday.db") as repo:
+        await repo.mark_screened(0)
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="workday",
+                run_started_at=NOW - timedelta(days=1),
+                quarantined=(held,),
+                detail_fetches=(DetailFetch(id=ident, resolved=True),),
+            )
+        )
+        result = await rescreen(repo, now=NOW)
+        assert result.quarantine_waiting == 1
+        queue = await repo.detail_queue("workday", 50)
+        assert ident in queue
+        async with _client(UNPACED) as client:
+            fetched = await WorkdayAdapter().fetch(
+                _company(workday_facet="timeType:f-intern"), client, NOW, None, queue
+            )
+        assert detail_request.called
+        kept, rejected = normalize_batch(fetched.jobs)
+        assert len(kept) == 1 and not rejected
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="workday",
+                run_started_at=NOW,
+                jobs=kept,
+                detail_fetches=tuple(
+                    entry for entry in fetched.detail_fetches if isinstance(entry, DetailFetch)
+                ),
+            )
+        )
+        restored = await repo.get_job(ident)
+        assert restored is not None
+        assert restored.degree_requirement is DegreeRequirement.PHD
+        assert restored.work_auth_flag
+        assert await repo.detail_queue("workday", 50) == []

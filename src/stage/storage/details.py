@@ -2,7 +2,15 @@ import json
 from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
 
-from stage.domain import UNKNOWN_TERM, Job, RateState, RoleCategory, WorkdayCrawl, WorkdayFacet
+from stage.domain import (
+    UNKNOWN_TERM,
+    Job,
+    RateState,
+    RejectionReason,
+    RoleCategory,
+    WorkdayCrawl,
+    WorkdayFacet,
+)
 from stage.domain.liveness import (
     AWAITING_PAGE,
     BOARD_SOURCES,
@@ -36,8 +44,11 @@ _QUEUED = (
 
 _AWAITING = (
     "FROM quarantine q LEFT JOIN detail_fetches d ON d.id = q.id "
-    "WHERE q.source = ? AND q.matched_phrase GLOB ? "
-    "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?))"
+    "WHERE q.source = ? AND (q.matched_phrase GLOB ? OR "
+    "(q.source IN ('workday', 'smartrecruiters') "
+    "AND q.reason IN (?, ?, ?, ?, ?))) "
+    "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
+    "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)))"
 )
 _QUEUE = (
     f"SELECT j.id, 1 AS rank, j.first_seen {_QUEUED} "
@@ -57,7 +68,13 @@ def _queued(source: str) -> tuple[object, ...]:
         REREAD_ATTEMPTS,
         source,
         f"*{AWAITING_PAGE}",
+        RejectionReason.OUT_OF_SCOPE_DEGREE.value,
+        RejectionReason.NOT_EARLY_CAREER.value,
+        RejectionReason.NOT_AN_INTERNSHIP.value,
+        RejectionReason.NOT_A_CS_ROLE.value,
+        RejectionReason.UNKNOWN_CS_ROLE.value,
         MAX_DETAIL_ATTEMPTS,
+        "rules:changed",
     )
 
 

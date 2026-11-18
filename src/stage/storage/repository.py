@@ -116,6 +116,9 @@ class Repository(Protocol):
     def load_workday_crawls(self) -> Mapping[str, WorkdayCrawl]:
         pass
 
+    def list_rescreen_jobs(self, after_id: str, limit: int) -> list[Job]:
+        pass
+
     def list_quarantined(self, filters: QuarantineFilters) -> list[QuarantinedJob]:
         pass
 

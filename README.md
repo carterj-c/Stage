@@ -476,9 +476,17 @@ Other roles keep their existing degree eligibility rules. Source acquisition is
 unchanged: broad ATS boards can provide these jobs, while curated internship feeds
 and Workday's early-career queries still constrain what is fetched.
 
-Upgrades rescreen stored postings and reconsider role and career-level quarantine
-rejections. Quarantine rows lack descriptions: degree-rejected postings stay in
-quarantine until a source refresh supplies the original degree and work authorization
-evidence. Recovery divides its bounded scan among rejection reasons, but a run can
-visit at most 100,000 quarantine rows and repeatedly scans from the start within each
-reason. Rescreening stored jobs retains its 100,000-posting and eight-pass limits.
+Upgrades rescreen stored postings in bounded pages. Quarantined postings lack their
+original descriptions, so they stay quarantined until a source refresh provides a
+description. Workday and SmartRecruiters queue eligible quarantined postings for a
+fresh job page, subject to the existing retry limit and availability of the listing.
+Curated and new-grad feeds that do not provide descriptions cannot automatically
+release these rows, including quant and non-intern postings: work authorization is
+stored as a boolean, so Stage cannot faithfully represent an unknown restriction.
+Those rows remain quarantined until a response with a description becomes available. The reported
+quarantine count is separate from stored postings examined during rescreen.
+A paged-source detail is fetched only when that posting appears in a board read.
+A capped queue can repeatedly select unavailable listings ahead of others; Stage
+does not yet guarantee progress for every waiting row. The rules-version stamp
+records the stored-posting rescreen, while the separate quarantine count reports
+recovery that remains outstanding.

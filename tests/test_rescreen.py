@@ -95,7 +95,7 @@ async def test_a_second_pass_finds_nothing_left_to_do(seeded: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rescreen_restores_a_quarantined_title_that_the_lexicon_now_accepts(
+async def test_rescreen_keeps_quarantined_title_until_a_fresh_body(
     db_path: Path,
 ) -> None:
     from stage.classify.scope import Rejection, to_quarantined
@@ -122,17 +122,15 @@ async def test_rescreen_restores_a_quarantined_title_that_the_lexicon_now_accept
     async with open_repository(db_path) as repository:
         result = await rescreen(repository, now=NOW)
 
-    assert result.released == 1
+    assert result.released == 0 and result.quarantine_waiting == 1
     store = SqliteRepository.connect(db_path)
-    restored = store.get_job(job.id)
-    assert restored is not None
-    assert restored.role is RoleCategory.SWE
-    assert store.list_quarantined(QuarantineFilters(limit=10)) == []
+    assert store.get_job(job.id) is None
+    assert len(store.list_quarantined(QuarantineFilters(limit=10))) == 1
     store.close()
 
 
 @pytest.mark.asyncio
-async def test_rescreen_restores_a_quarantined_location_that_is_now_in_scope(db_path: Path) -> None:
+async def test_rescreen_updates_quarantined_location_without_releasing_it(db_path: Path) -> None:
     from dataclasses import replace
 
     from stage.classify.scope import Rejection, to_quarantined
@@ -163,9 +161,9 @@ async def test_rescreen_restores_a_quarantined_location_that_is_now_in_scope(db_
     async with open_repository(db_path) as repository:
         result = await rescreen(repository, now=NOW)
 
-    assert result.released == 1
+    assert result.released == 0 and result.quarantine_waiting == 1
     store = SqliteRepository.connect(db_path)
-    assert store.get_job(job.id) is not None
+    assert store.get_job(job.id) is None
     store.close()
 
 
@@ -394,7 +392,7 @@ async def test_rescreen_converges_when_quarantining_a_canonical_promotes_a_follo
 
 
 @pytest.mark.asyncio
-async def test_a_pass_that_cannot_read_every_row_says_so(
+async def test_rescreen_pages_through_every_stored_row(
     seeded: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from stage.domain import JobFilters
@@ -406,10 +404,8 @@ async def test_a_pass_that_cannot_read_every_row_says_so(
 
     assert stored > 1, "the fixture has to hold more rows than the cap, or nothing is skipped"
     assert result.total == stored
-    assert result.examined == 1
-    assert result.skipped == stored - 1, (
-        "a capped pass reporting the full count is a silent truncation"
-    )
+    assert result.examined == stored
+    assert result.skipped == 0 and result.complete
 
 
 @pytest.mark.asyncio

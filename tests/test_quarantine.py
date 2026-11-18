@@ -180,7 +180,9 @@ async def test_a_released_posting_keeps_its_original_first_seen(
             SourceBatch(source="greenhouse", run_started_at=run_time, quarantined=rejected)
         )
 
-        released = _job("row", "Montreal, QC, Canada", later)
+        released = replace(
+            _job("row", "Montreal, QC, Canada", later), description="Build software."
+        )
         kept, still_rejected = normalize_batch([released])
         assert still_rejected == ()
         await repository.apply_source_batch(

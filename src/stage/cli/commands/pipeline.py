@@ -394,7 +394,6 @@ def rescreen(db: DatabaseOption = None) -> None:
 
     from stage.cli.render import terminal
     from stage.domain.text import counted
-    from stage.services.maintenance import RESCREEN_LIMIT
     from stage.services.maintenance import rescreen as rescreen_service
 
     console = terminal()
@@ -404,13 +403,21 @@ def rescreen(db: DatabaseOption = None) -> None:
         result = _with_db(
             db, lambda repository: rescreen_service(repository, now=datetime.now(UTC))
         )
+    if result.quarantine_waiting:
+        console.print(
+            f"[yellow]{counted(result.quarantine_waiting, 'quarantined posting')} await "
+            "a fresh source response with a description.[/yellow]"
+        )
+    if not result.complete:
+        console.print("[yellow]Rescreen did not settle. Run stage rescreen again.[/yellow]")
     if not result.examined and not result.released:
-        console.print("[dim]Nothing stored yet. Run stage sync.[/dim]")
+        if not result.quarantine_waiting:
+            console.print("[dim]Nothing stored yet. Run stage sync.[/dim]")
         return
     if result.skipped:
         console.print(
-            f"[yellow]{counted(result.skipped, 'posting')} not examined.[/yellow] This pass reads "
-            f"at most {RESCREEN_LIMIT:,} rows. Run stage purge, then stage rescreen again."
+            f"[yellow]{counted(result.skipped, 'posting')} not examined.[/yellow] "
+            "Run stage rescreen again."
         )
     if not result.changed:
         console.print(f"Re-screened {counted(result.examined, 'posting')}. None changed.")

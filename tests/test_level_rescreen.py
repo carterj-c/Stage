@@ -68,7 +68,7 @@ async def _reasons(repository: object) -> dict[str, tuple[str, str]]:
     return {row.id: (row.reason.value, row.matched_phrase) for row in rows}
 
 
-async def test_a_stored_not_an_internship_row_comes_back_with_its_level(db_path: Path) -> None:
+async def test_not_an_internship_rows_wait_for_a_source_refresh(db_path: Path) -> None:
     async with open_repository(db_path) as repository:
         await _store(
             repository,
@@ -83,16 +83,9 @@ async def test_a_stored_not_an_internship_row_comes_back_with_its_level(db_path:
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 4
-        assert await _levels(repository) == {
-            "grad": JobLevel.NEW_GRAD,
-            "entry": JobLevel.ENTRY,
-            "senior": JobLevel.SENIOR,
-            "plain": JobLevel.UNKNOWN,
-        }
-        assert await _reasons(repository) == {
-            "generalist": ("unknown-cs-role", NO_ROLE),
-        }
+        assert result.released == 0 and result.quarantine_waiting == 5
+        assert await _levels(repository) == {}
+        assert len(await _reasons(repository)) == 5
 
 
 async def test_a_second_pass_finds_nothing_to_release_or_relabel(db_path: Path) -> None:
@@ -125,7 +118,7 @@ async def test_an_ended_internship_term_keeps_its_not_an_internship_reason(db_pa
         assert await _reasons(repository) == {"old": ("not-an-internship", "summer 2025 has ended")}
 
 
-async def test_the_release_budget_is_shared_between_reasons(
+async def test_quarantined_rows_do_not_consume_the_stored_posting_page_limit(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(maintenance, "RESCREEN_LIMIT", 2)
@@ -138,15 +131,12 @@ async def test_the_release_budget_is_shared_between_reasons(
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 2
-        assert await _levels(repository) == {
-            "role1": JobLevel.INTERNSHIP,
-            "grad": JobLevel.NEW_GRAD,
-        }
-        assert list(await _reasons(repository)) == ["role0"]
+        assert result.released == 0 and result.quarantine_waiting == 3
+        assert await _levels(repository) == {}
+        assert set(await _reasons(repository)) == {"role0", "role1", "grad"}
 
 
-async def test_a_released_unknown_row_updates_when_a_lexicon_change_supplies_a_level(
+async def test_a_quarantined_row_stays_held_after_a_lexicon_change(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from stage.lexicon import level_lexicon
@@ -154,8 +144,8 @@ async def test_a_released_unknown_row_updates_when_a_lexicon_change_supplies_a_l
     async with open_repository(db_path) as repository:
         await _store(repository, [_entry("trainee", "Software Engineering Trainee")])
         await rescreen(repository, now=NOW)
-        assert await _reasons(repository) == {}
-        assert await _levels(repository) == {"trainee": JobLevel.UNKNOWN}
+        assert len(await _reasons(repository)) == 1
+        assert await _levels(repository) == {}
 
         real = level_lexicon()
         monkeypatch.setattr(
@@ -164,12 +154,12 @@ async def test_a_released_unknown_row_updates_when_a_lexicon_change_supplies_a_l
         )
         result = await rescreen(repository, now=NOW)
 
-        assert result.updated == 1
-        assert await _levels(repository) == {"trainee": JobLevel.ENTRY}
-        assert await _reasons(repository) == {}
+        assert result.updated == 0 and result.quarantine_waiting == 1
+        assert await _levels(repository) == {}
+        assert len(await _reasons(repository)) == 1
 
 
-async def test_not_early_career_rows_are_scanned_after_every_other_reason(
+async def test_quarantined_reasons_wait_independently_of_the_page_limit(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(maintenance, "RESCREEN_LIMIT", 2)
@@ -188,8 +178,8 @@ async def test_not_early_career_rows_are_scanned_after_every_other_reason(
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 2
-        assert set(await _levels(repository)) == {"older", "middle"}
+        assert result.released == 0 and result.quarantine_waiting == 4
+        assert await _levels(repository) == {}
 
 
 async def test_a_markerless_new_grad_feed_row_keeps_its_reason_through_a_rescreen(
@@ -228,7 +218,7 @@ async def test_a_markerless_new_grad_feed_row_keeps_its_reason_through_a_rescree
         }
 
 
-async def test_a_markerless_new_grad_feed_row_is_released_once_it_would_pass(
+async def test_a_markerless_new_grad_feed_row_needs_a_fresh_body(
     db_path: Path,
 ) -> None:
     async with open_repository(db_path) as repository:
@@ -249,12 +239,12 @@ async def test_a_markerless_new_grad_feed_row_is_released_once_it_would_pass(
 
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 1
-        assert await _levels(repository) == {"simplify-new-grad:acme:1": JobLevel.NEW_GRAD}
-        assert await _reasons(repository) == {}
+        assert result.released == 0 and result.quarantine_waiting == 1
+        assert await _levels(repository) == {}
+        assert len(await _reasons(repository)) == 1
 
 
-async def test_a_row_with_conflicting_source_category_is_released_with_unknown_level(
+async def test_a_quarantined_row_with_conflicting_source_category_needs_a_fresh_body(
     db_path: Path,
 ) -> None:
     async with open_repository(db_path) as repository:
@@ -275,9 +265,9 @@ async def test_a_row_with_conflicting_source_category_is_released_with_unknown_l
         result = await rescreen(repository, now=NOW)
         rows = await repository.list_quarantined(QuarantineFilters(limit=None))
 
-        assert (result.released, result.relabelled) == (1, 0)
-        assert rows == []
-        assert await _levels(repository) == {"custom:acme:1": JobLevel.UNKNOWN}
+        assert (result.released, result.relabelled) == (0, 0)
+        assert len(rows) == 1
+        assert await _levels(repository) == {}
 
 
 async def test_a_stored_posting_with_conflicting_category_keeps_unknown_level(

@@ -60,7 +60,8 @@ def _role_clause(roles: Collection[str], *, duplicates: bool) -> tuple[str, list
     copy_primary, copy_values = _among("copy.role", roles)
     copy_secondary, copy_extra = _among("value", roles)
     copies = (
-        "EXISTS (SELECT 1 FROM jobs copy WHERE copy.duplicate_of = jobs.id AND "
+        "EXISTS (SELECT 1 FROM jobs copy WHERE copy.duplicate_of = jobs.id "
+        "AND copy.status = jobs.status AND "
         f"({copy_primary} OR EXISTS (SELECT 1 FROM json_each(copy.roles) "
         f"WHERE {copy_secondary})))"
     )
@@ -147,14 +148,48 @@ def _matching(query: str, filters: JobFilters) -> tuple[str, list[Any]] | None:
     if not expression:
         return None
     clauses, params = _clauses(filters)
-    clauses.insert(0, "jobs.rowid IN (SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH ?)")
-    return f"FROM jobs WHERE {' AND '.join(clauses)}", [expression, *params]
+    match = "jobs.rowid IN (SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH ?)"
+    search_params: list[Any] = [expression]
+    if not filters.with_duplicates:
+        copy_filters = []
+        for selected in (
+            ({filters.role.value} if filters.role else set()),
+            {role.value for role in filters.roles},
+        ):
+            if selected:
+                own, own_values = _among("jobs.role", selected)
+                own_extra, own_extra_values = _among("value", selected)
+                child, child_values = _among("copy.role", selected)
+                child_extra, child_extra_values = _among("value", selected)
+                copy_filters.append(
+                    f"({own} OR EXISTS (SELECT 1 FROM json_each(jobs.roles) WHERE {own_extra}) "
+                    f"OR {child} OR EXISTS (SELECT 1 FROM json_each(copy.roles) "
+                    f"WHERE {child_extra}))"
+                )
+                search_params.extend(
+                    [*own_values, *own_extra_values, *child_values, *child_extra_values]
+                )
+        extra = " AND ".join(copy_filters) or "1"
+        match += (
+            " OR EXISTS (SELECT 1 FROM jobs copy WHERE copy.duplicate_of = jobs.id "
+            "AND copy.status = jobs.status AND copy.rowid IN "
+            f"(SELECT rowid FROM jobs_fts WHERE jobs_fts MATCH ?) AND {extra})"
+        )
+        search_params.insert(1, expression)
+    clauses.insert(0, f"({match})")
+    return f"FROM jobs WHERE {' AND '.join(clauses)}", [*search_params, *params]
 
 
 class PostingReads(Store):
     def list_jobs(self, filters: JobFilters) -> list[Job]:
         clauses, params = _clauses(filters)
         return self._jobs(f"FROM jobs WHERE {' AND '.join(clauses)}", params, filters.limit)
+
+    def list_rescreen_jobs(self, after_id: str, limit: int) -> list[Job]:
+        rows = self._conn.execute(
+            "SELECT * FROM jobs WHERE id > ? ORDER BY id LIMIT ?", (after_id, limit)
+        )
+        return [job_from(row) for row in rows]
 
     def count_jobs(self, filters: JobFilters) -> int:
         clauses, params = _clauses(filters)

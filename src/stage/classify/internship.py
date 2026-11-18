@@ -59,8 +59,9 @@ def screen_internship(
         padded = f" {folded_title} "
         manager_occupation = any(
             f" {phrase} " in padded
-            for category in ("project-management", "program-management")
-            for phrase in occupation_lexicon().get(category, ())
+            for phrases in occupation_lexicon().values()
+            for phrase in phrases
+            if "manager" in phrase.split()
         )
         blocked_levels = lexicon.structured_only_blocked
         if manager_occupation:

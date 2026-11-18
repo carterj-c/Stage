@@ -12,7 +12,6 @@ from stage.domain import (
     JobFilters,
     JobLevel,
     JobStatus,
-    QuarantinedJob,
     QuarantineFilters,
     RejectionReason,
     RoleCategory,
@@ -255,72 +254,6 @@ async def test_duplicate_roles_find_only_representatives_and_respect_other_filte
         choices = JobFilters(roles=frozenset({RoleCategory.PROJECT_MANAGEMENT}))
         assert await repo.count_jobs(choices) == 1
         assert await repo.count_search("Project", choices) == 1
-
-
-async def test_quarantine_budget_reaches_degree_after_more_than_100000_earlier_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from stage.classify.scope import Rejection, to_quarantined
-    from stage.services import maintenance
-
-    old = to_quarantined(
-        posting("Software Engineer Intern"), Rejection(RejectionReason.UNKNOWN_CS_ROLE, "unknown")
-    )
-    degree = replace(old, id="degree", reason=RejectionReason.OUT_OF_SCOPE_DEGREE)
-
-    class ManyRows:
-        def __init__(self) -> None:
-            self.requests: list[QuarantineFilters] = []
-
-        async def list_quarantined(self, filters: QuarantineFilters) -> list[QuarantinedJob]:
-            self.requests.append(filters)
-            total = (
-                100_001
-                if filters.reason is RejectionReason.UNKNOWN_CS_ROLE
-                else (1 if filters.reason is RejectionReason.OUT_OF_SCOPE_DEGREE else 0)
-            )
-            count = min(filters.limit or 0, max(0, total - filters.offset))
-            return [
-                degree if filters.reason is RejectionReason.OUT_OF_SCOPE_DEGREE else old
-            ] * count
-
-        async def relabel_quarantine(self, entries: tuple[QuarantinedJob, ...]) -> int:
-            return len(entries)
-
-    class EmptyScreener:
-        async def __call__(
-            self, jobs: tuple[Job, ...]
-        ) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
-            return (), ()
-
-        def close(self) -> None:
-            pass
-
-    repository = ManyRows()
-    monkeypatch.setattr("stage.services.screening.Screener", EmptyScreener)
-    released, relabelled = await maintenance._release_reclassified_quarantine(repository, NOW)  # type: ignore[arg-type]
-    assert (released, relabelled) == (0, 0)
-    assert any(
-        request.reason is RejectionReason.OUT_OF_SCOPE_DEGREE for request in repository.requests
-    )
-    examined = sum(
-        min(
-            request.limit or 0,
-            max(
-                0,
-                (
-                    100_001
-                    if request.reason is RejectionReason.UNKNOWN_CS_ROLE
-                    else 1
-                    if request.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
-                    else 0
-                )
-                - request.offset,
-            ),
-        )
-        for request in repository.requests
-    )
-    assert examined == maintenance.RESCREEN_LIMIT
 
 
 @pytest.mark.parametrize("baseline", [1, 2])

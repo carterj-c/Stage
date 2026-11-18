@@ -16,7 +16,6 @@ from stage.domain import (
     JobStatus,
     LocationBucket,
     QuarantinedJob,
-    RejectionReason,
     board_of,
 )
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
@@ -442,14 +441,11 @@ class BatchWriter(Store):
         with self._transaction() as conn:
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             without_description = [job for job in batch.jobs if not job.description.strip()]
-            held_degree = {
+            held_without_body = {
                 str(row["id"])
                 for row in conn.execute(
-                    f"SELECT id FROM quarantine WHERE reason = ? AND id IN {EACH}",
-                    (
-                        RejectionReason.OUT_OF_SCOPE_DEGREE.value,
-                        listed(j.id for j in without_description),
-                    ),
+                    f"SELECT id FROM quarantine WHERE id IN {EACH}",
+                    (listed(j.id for j in without_description),),
                 )
             }
             conn.executemany(
@@ -457,7 +453,7 @@ class BatchWriter(Store):
                 [
                     (to_text(job.last_seen), job.id)
                     for job in without_description
-                    if job.id in held_degree
+                    if job.id in held_without_body
                 ],
             )
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
@@ -469,7 +465,7 @@ class BatchWriter(Store):
                 for job in batch.jobs
                 if not seen.get(job.id, _UNSEEN).expired(cutoff)
                 and job.id not in retired
-                and job.id not in held_degree
+                and job.id not in held_without_body
             )
             held = _held_closed(conn, batch, jobs)
             jobs = tuple(
