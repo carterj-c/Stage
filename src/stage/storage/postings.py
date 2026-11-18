@@ -226,9 +226,10 @@ class PostingReads(Store):
         counts: dict[str, tuple[int, int]] = {}
         for row in self._conn.execute(
             "SELECT source, COUNT(*) AS total, "
-            "SUM(CASE WHEN length(trim(description, char(9, 10, 11, 12, 13, 32))) > 0 "
+            "SUM(CASE WHEN length(trim(description, ?)) > 0 "
             "THEN 1 ELSE 0 END) AS with_description FROM jobs "
-            "WHERE duplicate_of IS NULL GROUP BY source ORDER BY total DESC, source"
+            "WHERE duplicate_of IS NULL GROUP BY source ORDER BY total DESC, source",
+            ("".join(chr(i) for i in range(0x3100) if chr(i).isspace()),),
         ):
             counts[str(row["source"])] = (int(row["total"]), int(row["with_description"]))
         return counts

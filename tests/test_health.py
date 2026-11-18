@@ -499,7 +499,7 @@ async def test_description_coverage_counts_only_canonical_jobs_by_source(db_path
     jobs = (
         replace(canonical, description="A short summary still counts as present."),
         _job("greenhouse:acme:2", "greenhouse", "Acme"),
-        replace(_job("greenhouse:acme:3", "greenhouse", "Acme"), description=" \t\n\r"),
+        replace(_job("greenhouse:acme:3", "greenhouse", "Acme"), description=" \t\n\r\u00a0\u2003"),
         _job("workday:acme:4", "workday", "Acme"),
         replace(
             _job("lever:acme:5", "lever", "Acme"),

@@ -1,11 +1,12 @@
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
+from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field
 
 from stage.domain import Company, Job, Platform, SourceSignals, job_id
 from stage.sources import register
-from stage.sources._text import collapse_whitespace, strip_html
+from stage.sources._text import collapse_whitespace
 from stage.sources.base import BoardAdapter
 from stage.sources.platforms import safe_cased_slug
 
@@ -46,6 +47,8 @@ class LeverPosting(BaseModel):
     categories: LeverCategories | None = None
     descriptionPlain: str = ""
     additionalPlain: str = ""
+    descriptionBodyPlain: str = ""
+    salaryDescriptionPlain: str = ""
     lists: list[LeverList] = Field(default_factory=list)
 
 
@@ -70,13 +73,22 @@ class LeverAdapter(BoardAdapter):
                 part
                 for part in (
                     f"### {section.text}" if section.text else "",
-                    strip_html(section.content),
+                    BeautifulSoup(section.content, "html.parser").get_text("\n", strip=True),
                 )
                 if part
             )
             for section in row.lists
         ]
-        parts = (row.descriptionPlain, row.additionalPlain, *sections)
+        parts: list[str] = []
+        for part in (
+            row.descriptionPlain,
+            row.descriptionBodyPlain,
+            *sections,
+            row.salaryDescriptionPlain,
+            row.additionalPlain,
+        ):
+            if part and not any(part in previous for previous in parts):
+                parts.append(part)
         return Job(
             id=job_id(self.name, company.slug, row.id),
             source=self.name,
