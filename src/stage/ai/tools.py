@@ -1519,6 +1519,10 @@ def _command(arguments: dict[str, object]) -> str:
         value = arguments[key]
         if value is not None:
             parts += [flag, shlex.quote(str(value))]
+    industries = arguments.get("industries")
+    if isinstance(industries, list):
+        for industry in industries:
+            parts += ["--industry", shlex.quote(str(industry))]
     parts += [f"--{key}" for key in ("mine", "untracked", "new") if arguments[key]]
     if parts[1] != "export":
         parts.append("--all")

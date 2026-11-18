@@ -411,7 +411,13 @@ def test_a_cursor_reads_back_only_what_made_it() -> None:
 async def test_all_matches_returns_compact_rows_and_the_command_for_the_rest(
     tmp_path: Path,
 ) -> None:
-    many = _seed(tmp_path / "many.db", [_job(f"n{index}", hours=1) for index in range(260)])
+    many = _seed(
+        tmp_path / "many.db",
+        [
+            _job(f"n{index}", hours=1, company="Riot Games" if index % 2 else "Acme")
+            for index in range(260)
+        ],
+    )
     async with _connected(many) as client:
         found = await _ok(client, "search_postings", {"all_matches": True, "limit": 3})
         rest = await _ok(
@@ -420,10 +426,26 @@ async def test_all_matches_returns_compact_rows_and_the_command_for_the_rest(
         searched = await _ok(
             client, "search_postings", {"words": "intern", "all_matches": True, "mine": False}
         )
+        filtered = await _ok(
+            client,
+            "search_postings",
+            {
+                "words": "intern",
+                "all_matches": True,
+                "industries": ["gaming", "unknown"],
+                "role": "swe",
+                "level": "internship",
+            },
+        )
     assert found["columns"] == ["id", "company", "title", "location", "first_seen", "tracked"]
     assert found["count"] == 250 and rest["count"] == 10 and rest["next_cursor"] is None
     assert found["notes"][-1].endswith("stage export --format csv")
     assert searched["notes"][-1].endswith("stage search intern --all")
+    assert filtered["total"] == 260 and filtered["count"] == 250
+    assert filtered["notes"][-1].endswith(
+        "stage search intern --role swe --level internship "
+        "--industry gaming --industry unknown --all"
+    )
 
 
 def test_the_command_for_every_match_repeats_each_filter() -> None:
