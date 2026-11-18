@@ -125,7 +125,7 @@ async def test_an_ended_internship_term_keeps_its_not_an_internship_reason(db_pa
         assert await _reasons(repository) == {"old": ("not-an-internship", "summer 2025 has ended")}
 
 
-async def test_the_release_budget_serves_the_older_reasons_before_not_an_internship(
+async def test_the_release_budget_is_shared_between_reasons(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(maintenance, "RESCREEN_LIMIT", 2)
@@ -140,10 +140,10 @@ async def test_the_release_budget_serves_the_older_reasons_before_not_an_interns
 
         assert result.released == 2
         assert await _levels(repository) == {
-            "role0": JobLevel.INTERNSHIP,
             "role1": JobLevel.INTERNSHIP,
+            "grad": JobLevel.NEW_GRAD,
         }
-        assert list(await _reasons(repository)) == ["grad"], "the new reason takes what is left"
+        assert list(await _reasons(repository)) == ["role0"]
 
 
 async def test_a_released_unknown_row_updates_when_a_lexicon_change_supplies_a_level(

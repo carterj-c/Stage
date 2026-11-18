@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -5,7 +6,18 @@ import pytest
 
 from stage.classify import classify_role
 from stage.classify.level import screen_level
-from stage.domain import Job, JobFilters, JobLevel, RoleCategory
+from stage.domain import (
+    DegreeRequirement,
+    Job,
+    JobFilters,
+    JobLevel,
+    JobStatus,
+    QuarantinedJob,
+    QuarantineFilters,
+    RejectionReason,
+    RoleCategory,
+    SourceSignals,
+)
 from stage.domain.filters import with_default_levels
 from stage.domain.preferences import parse_levels
 from stage.services.maintenance import rescreen
@@ -120,19 +132,195 @@ async def test_durable_mixed_roles_default_and_rescreen(tmp_path: Path) -> None:
     assert parse_levels(["mid,senior,unknown"]) == (JobLevel.MID, JobLevel.SENIOR, JobLevel.UNKNOWN)
 
 
-async def test_old_degree_quarantine_reconsidered(tmp_path: Path) -> None:
+async def test_degree_quarantine_waits_for_complete_source_refresh(tmp_path: Path) -> None:
     from stage.classify.scope import Rejection, to_quarantined
-    from stage.domain import RejectionReason
 
-    job = posting("Quantitative Researcher")
-    entry = to_quarantined(job, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "phd"))
+    unsafe = posting("Software Engineer Intern", "PhD required. Must be a US citizen.")
+    eligible = posting("Quantitative Research Intern", "PhD required. Must be a US citizen.")
+    entries = tuple(
+        to_quarantined(job, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "phd required"))
+        for job in (unsafe, eligible)
+    )
     async with open_repository(tmp_path / "release.db") as repo:
         await repo.apply_source_batch(
-            SourceBatch(source="greenhouse", run_started_at=NOW, quarantined=(entry,))
+            SourceBatch(source="greenhouse", run_started_at=NOW, quarantined=entries)
         )
         result = await rescreen(repo, now=NOW)
-        assert result.released == 1
-        assert (await repo.list_jobs(JobFilters()))[0].level is JobLevel.UNKNOWN
+        assert result.released == 0
+        assert await repo.list_jobs(JobFilters()) == []
+        held = await repo.list_quarantined(QuarantineFilters(limit=None))
+        assert {entry.id for entry in held} == {job.id for job in (unsafe, eligible)}
+        assert all(entry.reason is RejectionReason.OUT_OF_SCOPE_DEGREE for entry in held)
+        incomplete, _ = normalize_batch([replace(eligible, description="")])
+        assert len(incomplete) == 1
+        await repo.apply_source_batch(
+            SourceBatch(source="greenhouse", run_started_at=NOW, jobs=incomplete)
+        )
+        assert await repo.get_job(eligible.id) is None
+        assert len(await repo.list_quarantined(QuarantineFilters(limit=None))) == 2
+        accepted, rejected = normalize_batch([unsafe, eligible])
+        assert [entry.id for entry in rejected] == [unsafe.id]
+        assert [job.id for job in accepted] == [eligible.id]
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="greenhouse", run_started_at=NOW, jobs=accepted, quarantined=rejected
+            )
+        )
+        refreshed = await repo.get_job(eligible.id)
+        assert refreshed is not None
+        assert refreshed.description == eligible.description
+        assert refreshed.degree_requirement is DegreeRequirement.PHD
+        assert refreshed.work_auth_flag
+        assert [
+            entry.id for entry in await repo.list_quarantined(QuarantineFilters(limit=None))
+        ] == [unsafe.id]
+
+
+@pytest.mark.parametrize("category", ["Software", "Quant"])
+def test_title_occupation_wins_source_category(category: str) -> None:
+    job = replace(posting("Project Manager"), signals=SourceSignals(category=category))
+    accepted, rejected = normalize_batch([job])
+    assert not rejected
+    assert accepted[0].role is RoleCategory.PROJECT_MANAGEMENT
+
+
+def test_exempt_occupation_survives_as_nonprimary_role() -> None:
+    job = posting("Software Engineering Project Manager", "PhD required.")
+    accepted, rejected = normalize_batch([job])
+    assert not rejected
+    assert accepted[0].role is RoleCategory.SWE
+    assert RoleCategory.PROJECT_MANAGEMENT in accepted[0].roles
+    assert accepted[0].degree_requirement is DegreeRequirement.PHD
+
+
+@pytest.mark.parametrize("title", ["Project Manager", "Program Manager"])
+def test_structured_intern_manager_occupations(title: str) -> None:
+    job = replace(posting(title), signals=SourceSignals(employment_type="Intern"))
+    accepted, rejected = normalize_batch([job])
+    assert not rejected
+    assert accepted[0].level is JobLevel.INTERNSHIP
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Manager of Interns",
+        "Internship Program Manager",
+        "Senior Project Manager",
+        "Engineering Manager",
+    ],
+)
+def test_structured_intern_does_not_override_manager_disqualifiers(title: str) -> None:
+    assert screen_level(title, employment_type="Intern").level is not JobLevel.INTERNSHIP
+
+
+@pytest.mark.parametrize("primary", [RoleCategory.PROJECT_MANAGEMENT, RoleCategory.SWE])
+async def test_duplicate_roles_find_only_representatives_and_respect_other_filters(
+    tmp_path: Path,
+    primary: RoleCategory,
+) -> None:
+    canonical = replace(
+        posting("Software Engineering Project Manager"),
+        id="greenhouse:acme:1",
+        role=RoleCategory.SWE,
+        roles=(RoleCategory.SWE,),
+        level=JobLevel.SENIOR,
+    )
+    duplicate = replace(
+        canonical,
+        id="lever:acme:2",
+        source="lever",
+        duplicate_of=canonical.id,
+        role=primary,
+        roles=(RoleCategory.PROJECT_MANAGEMENT,),
+    )
+    async with open_repository(tmp_path / "duplicates.db") as repo:
+        await repo.apply_source_batch(
+            SourceBatch(source="greenhouse", run_started_at=NOW, jobs=(canonical,))
+        )
+        await repo.apply_source_batch(
+            SourceBatch(source="lever", run_started_at=NOW, jobs=(duplicate,))
+        )
+        filters = JobFilters(role=RoleCategory.PROJECT_MANAGEMENT, level=JobLevel.SENIOR)
+        assert [job.id for job in await repo.list_jobs(filters)] == [canonical.id]
+        assert await repo.count_jobs(filters) == 1
+        assert [job.id for job in await repo.search_jobs("Project", filters)] == [canonical.id]
+        assert await repo.count_search("Project", filters) == 1
+        assert await repo.count_jobs(replace(filters, level=JobLevel.MID)) == 0
+        assert await repo.count_search("Project", replace(filters, source="lever")) == 0
+        assert await repo.count_jobs(replace(filters, status=JobStatus.CLOSED)) == 0
+        assert [job.id for job in await repo.list_jobs(replace(filters, with_duplicates=True))] == [
+            duplicate.id
+        ]
+        choices = JobFilters(roles=frozenset({RoleCategory.PROJECT_MANAGEMENT}))
+        assert await repo.count_jobs(choices) == 1
+        assert await repo.count_search("Project", choices) == 1
+
+
+async def test_quarantine_budget_reaches_degree_after_more_than_100000_earlier_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.classify.scope import Rejection, to_quarantined
+    from stage.services import maintenance
+
+    old = to_quarantined(
+        posting("Software Engineer Intern"), Rejection(RejectionReason.UNKNOWN_CS_ROLE, "unknown")
+    )
+    degree = replace(old, id="degree", reason=RejectionReason.OUT_OF_SCOPE_DEGREE)
+
+    class ManyRows:
+        def __init__(self) -> None:
+            self.requests: list[QuarantineFilters] = []
+
+        async def list_quarantined(self, filters: QuarantineFilters) -> list[QuarantinedJob]:
+            self.requests.append(filters)
+            total = (
+                100_001
+                if filters.reason is RejectionReason.UNKNOWN_CS_ROLE
+                else (1 if filters.reason is RejectionReason.OUT_OF_SCOPE_DEGREE else 0)
+            )
+            count = min(filters.limit or 0, max(0, total - filters.offset))
+            return [
+                degree if filters.reason is RejectionReason.OUT_OF_SCOPE_DEGREE else old
+            ] * count
+
+        async def relabel_quarantine(self, entries: tuple[QuarantinedJob, ...]) -> int:
+            return len(entries)
+
+    class EmptyScreener:
+        async def __call__(
+            self, jobs: tuple[Job, ...]
+        ) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+            return (), ()
+
+        def close(self) -> None:
+            pass
+
+    repository = ManyRows()
+    monkeypatch.setattr("stage.services.screening.Screener", EmptyScreener)
+    released, relabelled = await maintenance._release_reclassified_quarantine(repository, NOW)  # type: ignore[arg-type]
+    assert (released, relabelled) == (0, 0)
+    assert any(
+        request.reason is RejectionReason.OUT_OF_SCOPE_DEGREE for request in repository.requests
+    )
+    examined = sum(
+        min(
+            request.limit or 0,
+            max(
+                0,
+                (
+                    100_001
+                    if request.reason is RejectionReason.UNKNOWN_CS_ROLE
+                    else 1
+                    if request.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+                    else 0
+                )
+                - request.offset,
+            ),
+        )
+        for request in repository.requests
+    )
+    assert examined == maintenance.RESCREEN_LIMIT
 
 
 @pytest.mark.parametrize("baseline", [1, 2])

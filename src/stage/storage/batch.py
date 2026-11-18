@@ -16,6 +16,7 @@ from stage.domain import (
     JobStatus,
     LocationBucket,
     QuarantinedJob,
+    RejectionReason,
     board_of,
 )
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
@@ -440,6 +441,25 @@ class BatchWriter(Store):
         stamp = to_text(started)
         with self._transaction() as conn:
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
+            without_description = [job for job in batch.jobs if not job.description.strip()]
+            held_degree = {
+                str(row["id"])
+                for row in conn.execute(
+                    f"SELECT id FROM quarantine WHERE reason = ? AND id IN {EACH}",
+                    (
+                        RejectionReason.OUT_OF_SCOPE_DEGREE.value,
+                        listed(j.id for j in without_description),
+                    ),
+                )
+            }
+            conn.executemany(
+                "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
+                [
+                    (to_text(job.last_seen), job.id)
+                    for job in without_description
+                    if job.id in held_degree
+                ],
+            )
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
             known = _first_seen(seen, started)
             arriving = [job for job in batch.jobs if job.id not in seen]
@@ -447,7 +467,9 @@ class BatchWriter(Store):
             jobs = tuple(
                 replace(job, first_seen=known[job.id]) if job.id in known else job
                 for job in batch.jobs
-                if not seen.get(job.id, _UNSEEN).expired(cutoff) and job.id not in retired
+                if not seen.get(job.id, _UNSEEN).expired(cutoff)
+                and job.id not in retired
+                and job.id not in held_degree
             )
             held = _held_closed(conn, batch, jobs)
             jobs = tuple(

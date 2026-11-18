@@ -281,19 +281,32 @@ async def _release_reclassified_quarantine(
 
     remaining = RESCREEN_LIMIT
     entries: list[QuarantinedJob] = []
-    for reason in (
+    active = [
         RejectionReason.UNKNOWN_CS_ROLE,
         RejectionReason.NOT_A_CS_ROLE,
         RejectionReason.OUT_OF_SCOPE_LOCATION,
         RejectionReason.NOT_AN_INTERNSHIP,
         RejectionReason.NOT_EARLY_CAREER,
         RejectionReason.OUT_OF_SCOPE_DEGREE,
-    ):
-        if not remaining:
-            break
-        found = await repository.list_quarantined(QuarantineFilters(reason=reason, limit=remaining))
-        entries.extend(found)
-        remaining -= len(found)
+    ]
+    offsets = dict.fromkeys(active, 0)
+    while active and remaining:
+        share = max(1, remaining // len(active))
+        next_round = []
+        for reason in active:
+            if not remaining:
+                break
+            limit = min(share, remaining)
+            found = await repository.list_quarantined(
+                QuarantineFilters(reason=reason, limit=limit, offset=offsets[reason])
+            )
+            offsets[reason] += len(found)
+            remaining -= len(found)
+            if reason is not RejectionReason.OUT_OF_SCOPE_DEGREE:
+                entries.extend(found)
+            if len(found) == limit:
+                next_round.append(reason)
+        active = next_round
     candidates = tuple(
         Job(
             id=entry.id,

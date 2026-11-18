@@ -78,7 +78,7 @@ def classify_role(title: str, description: str = "", source_category: str = "") 
     }
     occupations = {category: phrases for category, phrases in occupations.items() if phrases}
     if occupations:
-        legacy = _classify_legacy(title, "", source_category)
+        legacy = _classify_legacy(title, "", "")
         categories = tuple(
             sorted(
                 {RoleCategory(category) for category in occupations}

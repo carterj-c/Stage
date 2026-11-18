@@ -123,7 +123,8 @@ def _restricted_hit(haystack: str, phrases: frozenset[str], alternatives: frozen
 
 
 def screen_degree_scope(job: Job) -> Rejection | None:
-    if job.role is RoleCategory.QUANT or job.role.value in occupation_lexicon():
+    roles = {job.role, *job.roles}
+    if RoleCategory.QUANT in roles or any(role.value in occupation_lexicon() for role in roles):
         return None
     lexicon = eligibility_lexicon()
 
@@ -189,7 +190,9 @@ def screen_is_cs_role(job: Job) -> Rejection | None:
     title = fold(job.title_raw)
     title_verdict = classify_role(job.title_raw, source_category=job.signals.category)
 
-    if title_verdict.role.value in occupation_lexicon():
+    if any(
+        role.value in occupation_lexicon() for role in (title_verdict.role, *title_verdict.roles)
+    ):
         return None
 
     phrase = _hit(title, lexicon.excluded_titles)

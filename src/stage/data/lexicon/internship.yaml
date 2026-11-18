@@ -191,6 +191,8 @@ structured_excluded:
   - campus hire
   - campus hires
 
+
+# Project and program occupations can use structured internship evidence.
 structured_only_blocked:
   - senior
   - principal

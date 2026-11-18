@@ -476,8 +476,9 @@ Other roles keep their existing degree eligibility rules. Source acquisition is
 unchanged: broad ATS boards can provide these jobs, while curated internship feeds
 and Workday's early-career queries still constrain what is fetched.
 
-Upgrades rescreen stored postings and reconsider degree, role, and career-level
-quarantine rejections. Quarantine recovery uses stored title and source signals:
-older quarantine rows do not retain descriptions, so degree metadata and other
-body-only evidence require a later source refresh. Rescreening retains its existing
-100,000-posting cap (including quarantine candidates) and eight-pass limit.
+Upgrades rescreen stored postings and reconsider role and career-level quarantine
+rejections. Quarantine rows lack descriptions: degree-rejected postings stay in
+quarantine until a source refresh supplies the original degree and work authorization
+evidence. Recovery divides its bounded scan among rejection reasons, but a run can
+visit at most 100,000 quarantine rows and repeatedly scans from the start within each
+reason. Rescreening stored jobs retains its 100,000-posting and eight-pass limits.

@@ -51,6 +51,22 @@ def _among(column: str, values: Collection[str], verb: str = "IN") -> tuple[str,
     return f"{column} {verb} ({marks(len(chosen))})", chosen
 
 
+def _role_clause(roles: Collection[str], *, duplicates: bool) -> tuple[str, list[Any]]:
+    primary, values = _among("jobs.role", roles)
+    secondary, extra = _among("value", roles)
+    own = f"({primary} OR EXISTS (SELECT 1 FROM json_each(jobs.roles) WHERE {secondary}))"
+    if duplicates:
+        return own, [*values, *extra]
+    copy_primary, copy_values = _among("copy.role", roles)
+    copy_secondary, copy_extra = _among("value", roles)
+    copies = (
+        "EXISTS (SELECT 1 FROM jobs copy WHERE copy.duplicate_of = jobs.id AND "
+        f"({copy_primary} OR EXISTS (SELECT 1 FROM json_each(copy.roles) "
+        f"WHERE {copy_secondary})))"
+    )
+    return f"({own} OR {copies})", [*values, *extra, *copy_values, *copy_extra]
+
+
 def _clauses(filters: JobFilters) -> tuple[list[str], list[Any]]:
     clauses: list[str] = ["1"] if filters.with_duplicates else ["jobs.duplicate_of IS NULL"]
     params: list[Any] = []
@@ -68,10 +84,7 @@ def _clauses(filters: JobFilters) -> tuple[list[str], list[Any]]:
     if filters.degree is not None:
         where("jobs.degree_requirement = ?", [filters.degree.value])
     if filters.role is not None:
-        where(
-            "(jobs.role = ? OR EXISTS (SELECT 1 FROM json_each(jobs.roles) WHERE value = ?))",
-            [filters.role.value, filters.role.value],
-        )
+        where(*_role_clause({filters.role.value}, duplicates=filters.with_duplicates))
     if filters.level is not None:
         where("jobs.level = ?", [filters.level.value])
     if filters.language in (Language.EN, Language.FR):
@@ -112,11 +125,10 @@ def _clauses(filters: JobFilters) -> tuple[list[str], list[Any]]:
             values.append(listed(catalogue))
         where("(" + " OR ".join(parts) + ")", values)
     if filters.roles:
-        primary, values = _among("jobs.role", {role.value for role in filters.roles})
-        secondary, extra = _among("value", {role.value for role in filters.roles})
         where(
-            f"({primary} OR EXISTS (SELECT 1 FROM json_each(jobs.roles) WHERE {secondary}))",
-            [*values, *extra],
+            *_role_clause(
+                {role.value for role in filters.roles}, duplicates=filters.with_duplicates
+            )
         )
     if filters.levels:
         where(*_among("jobs.level", {level.value for level in filters.levels}))
