@@ -1738,7 +1738,7 @@ async def _run_feed_source(
         yield CompanyDeferred(
             source=source,
             company=label,
-            reason="Posting changed during screening; the feed will be read again",
+            reason="Posting changed during screening, so the feed will be read again",
         )
     yield ledger.settle(
         source,

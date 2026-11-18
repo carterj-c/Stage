@@ -140,7 +140,7 @@ def _json_detail(target: HydrationTarget, data: object) -> HydrationDetail | Non
     return HydrationDetail(
         body,
         complete,
-        "" if complete else "Lever section fields absent; completeness unverified",
+        "" if complete else "Lever section fields absent, so completeness is unverified",
     )
 
 
