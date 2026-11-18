@@ -93,7 +93,7 @@ def test_catalogue_normalizes_and_rejects_collisions() -> None:
     assert "riot" not in catalogue
     assert "ea" not in catalogue
     assert "square" not in catalogue
-    assert "block" not in catalogue
+    assert catalogue[fold_company("Block")] == {Industry.FINTECH, Industry.TECH, Industry.FINANCE}
     assert catalogue[fold_company("Stripe")] == {Industry.FINTECH, Industry.TECH, Industry.FINANCE}
     assert catalogue[fold_company("Royal Bank of Canada")] == {Industry.FINANCE}
     both = validate_catalogue([{"aliases": ["Dual"], "industries": ["gaming", "fintech"]}])
@@ -269,6 +269,25 @@ def test_finance_tech_and_unknown_stored_postings(stored: Path) -> None:
         assert repo.count_jobs(tech_finance) == 2
         unknown = replace(finance, industries=frozenset({Industry.UNKNOWN}))
         assert {job.company for job in repo.list_jobs(unknown)} == {"Riot", "Unlisted"}
+
+
+def test_registered_block_name_matches_industry_without_matching_blockhouse(tmp_path: Path) -> None:
+    with closing(SqliteRepository.connect(tmp_path / "block.db")) as repo:
+        repo.apply_source_batch(
+            SourceBatch(
+                source="greenhouse",
+                run_started_at=NOW,
+                jobs=(
+                    replace(job("one", "Block"), id="greenhouse:block:one"),
+                    replace(job("two", "Blockhouse"), id="greenhouse:blockhouse:two"),
+                ),
+            )
+        )
+        for industry in (Industry.FINTECH, Industry.TECH, Industry.FINANCE):
+            filters = JobFilters(industries=frozenset({industry}))
+            assert [posting.company for posting in repo.list_jobs(filters)] == ["Block"]
+        unknown = JobFilters(industries=frozenset({Industry.UNKNOWN}))
+        assert [posting.company for posting in repo.list_jobs(unknown)] == ["Blockhouse"]
 
 
 def test_cli_new_industries_and_saved_preferences(stored: Path) -> None:

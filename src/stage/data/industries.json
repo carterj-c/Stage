@@ -97,13 +97,15 @@
   },
   {
     "aliases": [
+      "Block",
       "Block, Inc."
     ],
     "industries": [
       "fintech",
       "tech",
       "finance"
-    ]
+    ],
+    "note": "Block is the registered greenhouse/block employer. Name-only matching also classifies unrelated employers with the exact same normalized name."
   },
   {
     "aliases": [
