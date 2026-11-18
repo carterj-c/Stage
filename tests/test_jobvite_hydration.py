@@ -66,7 +66,6 @@ async def test_saved_full_posting_keeps_all_duties_requirements_and_tail() -> No
     assert body is not None
     for meta in body.select("h3, .jv-meta"):
         meta.decompose()
-    # Compare the whole saved body, not just an opening paragraph or a length threshold.
     assert "".join(job.description.split()) == "".join(body.get_text().split())
     assert len(job.description) > 3800
     assert all(not job.description for job in result.jobs if job.id != IDENT)

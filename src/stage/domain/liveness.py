@@ -6,7 +6,7 @@ from stage.domain.enums import Platform
 
 CHECK_PREFIX = "check:"
 CHECKED_SOURCES = frozenset({"greenhouse", "lever", "smartrecruiters", "workday"})
-PAGED_SOURCES = frozenset({"smartrecruiters", "workday"})
+PAGED_SOURCES = frozenset({"jobvite", "smartrecruiters", "workday"})
 BOARD_SOURCES = frozenset(platform.value for platform in Platform)
 AWAITING_PAGE = ", waiting for its job page"
 RECHECK_AFTER_HOURS = 6

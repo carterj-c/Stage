@@ -130,8 +130,6 @@ def _description(text: str, url: str) -> str:
     page = BeautifulSoup(text, "html.parser")
     body = page.select_one("div.jv-job-detail-description")
     bottom = page.select_one("div.jv-job-detail-bottom-actions")
-    # A parser repairs truncated HTML. Require the following posting-specific
-    # actions too, rather than treating an unfinished description as complete.
     if (
         body is None
         or bottom is None
