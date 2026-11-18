@@ -1,13 +1,17 @@
+import re
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import Any, ClassVar
 
+import httpx
+from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from stage.domain import Company, Job, Platform, board_key, job_id
-from stage.http import HttpClient
+from stage.domain import Company, DetailFetch, Job, Platform, board_key, job_id
+from stage.http import HttpClient, HttpError, RequestRefusedError
 from stage.sources import register
-from stage.sources._text import collapse_whitespace, strip_html
+from stage.sources._text import collapse_whitespace
 from stage.sources.base import (
     FetchResult,
     NullableStr,
@@ -19,6 +23,8 @@ from stage.sources.base import (
 from stage.sources.platforms import oracle_target
 
 PATH = "/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+DETAIL_PATH = "/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails"
+DETAIL_BUDGET = 20
 PAGE_SIZE = 100
 MAX_PAGES = 16
 KEYWORD = "internship"
@@ -37,6 +43,50 @@ class OraclePosting(BaseModel):
     ExternalResponsibilitiesStr: NullableStr = ""
 
 
+class OracleDetail(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    Id: str
+    ExternalDescriptionStr: str
+    ExternalQualificationsStr: NullableStr = ""
+    ExternalResponsibilitiesStr: NullableStr = ""
+    CorporateDescriptionStr: NullableStr = ""
+    OrganizationDescriptionStr: NullableStr = ""
+    ShortDescriptionStr: NullableStr = ""
+
+
+def _text(raw: str) -> str:
+    # Parse markup before decoding entities so encoded comparisons remain text.
+    soup = BeautifulSoup(raw, "html.parser")
+    for element in soup(["script", "style"]):
+        element.decompose()
+    return collapse_whitespace(soup.get_text(" ", strip=True))
+
+
+def _detail_body(payload: Any, identifier: str, summary: str) -> str:
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or len(items) != 1:
+        return ""
+    row = OracleDetail.model_validate(items[0])
+    description = _text(row.ExternalDescriptionStr)
+    if row.Id != identifier or not description:
+        return ""
+    # A successful HTTP response carrying only the search blurb is not a full read.
+    if description in {_text(summary), _text(row.ShortDescriptionStr)}:
+        return ""
+    return "\n\n".join(
+        text
+        for raw in (
+            row.ExternalDescriptionStr,
+            row.ExternalResponsibilitiesStr,
+            row.ExternalQualificationsStr,
+            row.CorporateDescriptionStr,
+            row.OrganizationDescriptionStr,
+        )
+        if (text := _text(raw))
+    )
+
+
 class OraclePage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -51,9 +101,9 @@ class OracleCloudAdapter:
     rate_profile: ClassVar[str] = "paginated"
     hosts: ClassVar[frozenset[str]] = frozenset()
     bucket_key: ClassVar[str] = "oracle_cloud"
-    detail_budget: ClassVar[int] = 0
+    detail_budget: ClassVar[int] = DETAIL_BUDGET
     rotation_slice: ClassVar[int] = 0
-    max_requests_per_company: ClassVar[int] = MAX_PAGES
+    max_requests_per_company: ClassVar[int] = MAX_PAGES + DETAIL_BUDGET
 
     def host_for(self, company: Company) -> str:
         host, _ = oracle_target(company.oracle_host or "", company.oracle_site or "")
@@ -89,6 +139,11 @@ class OracleCloudAdapter:
         facets: object = None,
         details: Sequence[str] = (),
     ) -> FetchResult:
+        wanted = set(
+            dict.fromkeys(
+                ident for ident in details if ident.startswith(f"{self.board_key(company)}:")
+            )
+        )
         postings: list[OraclePosting] = []
         malformed = 0
         truncated = False
@@ -96,15 +151,23 @@ class OracleCloudAdapter:
 
         for page in range(MAX_PAGES):
             response = await client.get_json(
-                self.url_for(company), params=self.params_for(company, page * PAGE_SIZE)
+                self.url_for(company),
+                params=self.params_for(company, page * PAGE_SIZE),
+                revalidate=bool(wanted),
             )
             if response.not_modified:
                 if page == 0:
                     return FetchResult(not_modified=True)
-                return FetchResult(
-                    jobs=tuple(self._to_job(company, row, now) for row in postings),
-                    authoritative=False,
-                    degraded="A later page answered 304, so the walk ended early.",
+                return await self._attach_descriptions(
+                    company,
+                    client,
+                    postings,
+                    wanted,
+                    FetchResult(
+                        jobs=tuple(self._to_job(company, row, now) for row in postings),
+                        authoritative=False,
+                        degraded="A later page answered 304, so the walk ended early.",
+                    ),
                 )
             rows, dropped, total = self._validate(company, response.payload)
             malformed += dropped
@@ -117,14 +180,65 @@ class OracleCloudAdapter:
         else:
             truncated = True
 
-        return FetchResult(
-            jobs=tuple(self._to_job(company, row, now) for row in postings),
-            authoritative=not (truncated or premature_end or malformed),
-            degraded=sentences(
-                f"Stage stopped at the {MAX_PAGES}-page cap" if truncated else "",
-                "The board sent an empty page before its stated total" if premature_end else "",
-                malformed_note(malformed),
+        return await self._attach_descriptions(
+            company,
+            client,
+            postings,
+            wanted,
+            FetchResult(
+                jobs=tuple(self._to_job(company, row, now) for row in postings),
+                authoritative=not (truncated or premature_end or malformed),
+                degraded=sentences(
+                    f"Stage stopped at the {MAX_PAGES}-page cap" if truncated else "",
+                    "The board sent an empty page before its stated total" if premature_end else "",
+                    malformed_note(malformed),
+                ),
             ),
+        )
+
+    async def _attach_descriptions(
+        self,
+        company: Company,
+        client: HttpClient,
+        postings: Sequence[OraclePosting],
+        wanted: set[str],
+        result: FetchResult,
+    ) -> FetchResult:
+        host, site = oracle_target(company.oracle_host or "", company.oracle_site or "")
+        bodies: dict[str, str] = {}
+        outcomes: list[DetailFetch] = []
+        for row, job in zip(postings, result.jobs, strict=True):
+            if job.id not in wanted or job.id in bodies:
+                continue
+            if len(outcomes) >= self.detail_budget:
+                break
+            body = ""
+            if re.fullmatch(r"[0-9]+", row.Id):
+                try:
+                    response = await client.get_json(
+                        f"https://{host}{DETAIL_PATH}",
+                        params={
+                            "onlyData": "true",
+                            "finder": f"ById;Id={row.Id},siteNumber={site}",
+                        },
+                        revalidate=True,
+                    )
+                    if not response.not_modified:
+                        body = _detail_body(response.payload, row.Id, row.ShortDescriptionStr)
+                except RequestRefusedError:
+                    # No request was admitted: do not consume a persisted retry attempt.
+                    break
+                except (HttpError, httpx.HTTPError, ValidationError):
+                    pass
+            bodies[job.id] = body
+            outcomes.append(DetailFetch(id=job.id, resolved=bool(body), failed=not bool(body)))
+        return replace(
+            result,
+            jobs=tuple(
+                replace(job, description=bodies[job.id]) if bodies.get(job.id) else job
+                for job in result.jobs
+            ),
+            detail_fetches=tuple(outcomes),
         )
 
     def _validate(self, company: Company, payload: Any) -> tuple[list[OraclePosting], int, int]:
@@ -148,17 +262,9 @@ class OracleCloudAdapter:
     def _to_job(self, company: Company, row: OraclePosting, now: datetime) -> Job:
         host, site = oracle_target(company.oracle_host or "", company.oracle_site or "")
         title = collapse_whitespace(row.Title)
-        description = collapse_whitespace(
-            " ".join(
-                strip_html(text)
-                for text in (
-                    row.ShortDescriptionStr,
-                    row.ExternalQualificationsStr,
-                    row.ExternalResponsibilitiesStr,
-                )
-                if text
-            )
-        )
+        # Search fields are summaries. Empty bodies let sync carry stored full text
+        # before screening; only validated ById responses may supply a new body.
+        description = ""
         location = collapse_whitespace(
             ", ".join(part for part in (row.PrimaryLocation, row.PrimaryLocationCountry) if part)
         )

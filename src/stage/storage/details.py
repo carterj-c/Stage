@@ -36,8 +36,10 @@ REREAD_ATTEMPTS = 2
 _QUEUED = (
     "FROM jobs j LEFT JOIN detail_fetches d ON d.id = j.id "
     "WHERE j.source = ? AND j.status = ? AND ("
-    "(j.description = '' AND (j.source IN ('workday', 'smartrecruiters', 'jobvite') "
+    "((j.description = '' OR j.source = 'oracle_cloud') AND (j.source IN "
+    "('workday', 'smartrecruiters', 'jobvite', 'oracle_cloud') "
     "OR j.term = ? OR j.role = ? OR j.work_auth_known = 0) "
+    "AND (j.source <> 'oracle_cloud' OR d.id IS NULL OR d.resolved = 0) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
     "OR (d.resolved = 1 AND d.attempts < ?) "
     "OR d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = 'rules:changed'))) "
@@ -48,7 +50,7 @@ _QUEUED = (
 _AWAITING = (
     "FROM quarantine q LEFT JOIN detail_fetches d ON d.id = q.id "
     "WHERE q.source = ? AND (q.matched_phrase GLOB ? OR "
-    "(q.source IN ('workday', 'smartrecruiters') "
+    "(q.source IN ('workday', 'smartrecruiters', 'oracle_cloud') "
     "AND q.reason IN (?, ?, ?, ?, ?, ?))) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
     "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)))"
