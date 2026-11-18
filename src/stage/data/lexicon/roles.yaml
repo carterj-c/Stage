@@ -2275,3 +2275,83 @@ source_categories:
   security:
     - Security
     - Cybersecurity
+
+# Occupations use title evidence only, never employer industry or description keywords.
+# Extend these phrases and per-category negatives without changing classifier logic.
+occupations:
+  project-management:
+    - project manager
+    - project management
+    - project coordinator
+    - chef de projet
+    - charge de projet
+    - gestionnaire de projet
+  program-management:
+    - program manager
+    - programme manager
+    - program management
+    - program coordinator
+    - gestionnaire de programme
+    - directeur de programme
+  production:
+    - producer
+    - production director
+    - game producer
+    - games producer
+    - game production
+    - video game producer
+    - associate producer
+    - senior producer
+    - executive producer
+    - production coordinator
+    - production manager
+    - producteur de jeux
+  finance:
+    - financial analyst
+    - financial planning
+    - finance analyst
+    - finance manager
+    - finance director
+    - corporate finance
+    - fp a
+    - treasury analyst
+    - treasury manager
+    - portfolio manager
+    - portfolio analyst
+    - asset management analyst
+    - wealth management analyst
+    - equity research
+    - investment analyst
+    - investment research
+    - investment banking
+    - credit analyst
+  investment-research:
+    - investment research
+    - investment analyst
+    - equity research
+    - credit research
+    - fixed income research
+    - fundamental research analyst
+  investment-banking:
+    - investment banking
+    - investment banker
+    - mergers and acquisitions
+    - capital markets analyst
+  risk:
+    - risk analyst
+    - risk manager
+    - risk management
+    - credit risk
+    - market risk
+    - model risk
+    - quantitative risk
+occupation_negatives:
+  project-management:
+    - product manager
+  program-management:
+    - product manager
+  production:
+    - manufacturing production
+    - production operator
+    - production line
+    - food production

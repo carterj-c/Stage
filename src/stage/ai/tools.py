@@ -44,9 +44,24 @@ if TYPE_CHECKING:
 
 Place = Literal["montreal", "canada", "usa", "unknown"]
 Role = Literal[
-    "swe", "security", "data", "ml-ai", "quant", "infra", "embedded", "general-cs", "unknown"
+    "swe",
+    "security",
+    "data",
+    "ml-ai",
+    "quant",
+    "infra",
+    "embedded",
+    "general-cs",
+    "project-management",
+    "program-management",
+    "production",
+    "finance",
+    "investment-research",
+    "investment-banking",
+    "risk",
+    "unknown",
 ]
-Level = Literal["internship", "new-grad", "entry", "all"]
+Level = Literal["internship", "new-grad", "entry", "mid", "senior", "unknown", "all"]
 Language = Literal["en", "fr", "bilingual", "unknown"]
 Status = Literal["saved", "applied", "interviewing", "offer", "rejected", "withdrawn", "hidden"]
 Reason = Literal[
@@ -58,8 +73,24 @@ Reason = Literal[
     "not-early-career",
 ]
 ChosenPlace = Literal["montreal", "canada", "usa"]
-ChosenRole = Literal["swe", "security", "data", "ml-ai", "quant", "infra", "embedded", "general-cs"]
-ChosenLevel = Literal["internship", "new-grad", "entry"]
+ChosenRole = Literal[
+    "swe",
+    "security",
+    "data",
+    "ml-ai",
+    "quant",
+    "infra",
+    "embedded",
+    "general-cs",
+    "project-management",
+    "program-management",
+    "production",
+    "finance",
+    "investment-research",
+    "investment-banking",
+    "risk",
+]
+ChosenLevel = Literal["internship", "new-grad", "entry", "mid", "senior", "unknown"]
 SEASONS = ("summer", "fall", "winter", "spring")
 TERM = rf"^(({'|'.join(SEASONS)})-[0-9]{{4}}|unknown)$"
 CHOSEN_TERM = rf"^({'|'.join(SEASONS)})-[0-9]{{4}}$"
@@ -194,7 +225,11 @@ PlaceFilter = Annotated[
 RoleFilter = Annotated[Role | None, Field(description="The kind of work"), _default(None)]
 LevelFilter = Annotated[
     Level | None,
-    Field(description="internship, new-grad, entry, or all. Internships only by default"),
+    Field(
+        description=(
+            "internship, new-grad, entry, mid, senior, unknown, or all. Internships only by default"
+        )
+    ),
     _default(None),
 ]
 TermFilter = Annotated[

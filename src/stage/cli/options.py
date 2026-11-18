@@ -274,7 +274,7 @@ LevelOption = Annotated[
     typer.Option(
         "--level",
         metavar="LEVEL",
-        help="Filter by level: internship (the default), new-grad, entry, all",
+        help="Level: internship (default), new-grad, entry, mid, senior, unknown, all",
     ),
 ]
 LanguageOption = Annotated[

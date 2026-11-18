@@ -177,6 +177,8 @@ def render_posting(
     console.print(field("location", where))
     state("term", job.term)
     state("role", job.role.value)
+    if len(job.roles) > 1:
+        console.print(field("roles", ", ".join(role.value for role in job.roles)))
     state("level", job.level.value)
     state("language", job.language.value)
     state("degree", job.degree_requirement.value)

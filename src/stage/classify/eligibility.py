@@ -5,9 +5,9 @@ from urllib.parse import urlsplit
 
 from stage.classify.role import classify_role
 from stage.classify.scope import Rejection
-from stage.domain import DegreeRequirement, Job, JobLevel, RejectionReason
+from stage.domain import DegreeRequirement, Job, JobLevel, RejectionReason, RoleCategory
 from stage.domain.liveness import AWAITING_PAGE, PAGED_SOURCES
-from stage.lexicon import QualifiedTitles, eligibility_lexicon, fold
+from stage.lexicon import QualifiedTitles, eligibility_lexicon, fold, occupation_lexicon
 
 _ORDER = ("phd", "masters", "bachelors")
 _EARLY_CAREER = frozenset({JobLevel.NEW_GRAD, JobLevel.ENTRY})
@@ -123,6 +123,8 @@ def _restricted_hit(haystack: str, phrases: frozenset[str], alternatives: frozen
 
 
 def screen_degree_scope(job: Job) -> Rejection | None:
+    if job.role is RoleCategory.QUANT or job.role.value in occupation_lexicon():
+        return None
     lexicon = eligibility_lexicon()
 
     body = fold(f"{job.title_raw} {job.description}")
@@ -186,6 +188,9 @@ def screen_is_cs_role(job: Job) -> Rejection | None:
     lexicon = eligibility_lexicon()
     title = fold(job.title_raw)
     title_verdict = classify_role(job.title_raw, source_category=job.signals.category)
+
+    if title_verdict.role.value in occupation_lexicon():
+        return None
 
     phrase = _hit(title, lexicon.excluded_titles)
     exception = _hit(title, lexicon.technical_title_exceptions)

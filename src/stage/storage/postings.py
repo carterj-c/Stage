@@ -68,7 +68,10 @@ def _clauses(filters: JobFilters) -> tuple[list[str], list[Any]]:
     if filters.degree is not None:
         where("jobs.degree_requirement = ?", [filters.degree.value])
     if filters.role is not None:
-        where("jobs.role = ?", [filters.role.value])
+        where(
+            "(jobs.role = ? OR EXISTS (SELECT 1 FROM json_each(jobs.roles) WHERE value = ?))",
+            [filters.role.value, filters.role.value],
+        )
     if filters.level is not None:
         where("jobs.level = ?", [filters.level.value])
     if filters.language in (Language.EN, Language.FR):
@@ -98,7 +101,12 @@ def _clauses(filters: JobFilters) -> tuple[list[str], list[Any]]:
             places = [*places, *companies, *nowhere]
         where(placed, places)
     if filters.roles:
-        where(*_among("jobs.role", {role.value for role in filters.roles}))
+        primary, values = _among("jobs.role", {role.value for role in filters.roles})
+        secondary, extra = _among("value", {role.value for role in filters.roles})
+        where(
+            f"({primary} OR EXISTS (SELECT 1 FROM json_each(jobs.roles) WHERE {secondary}))",
+            [*values, *extra],
+        )
     if filters.levels:
         where(*_among("jobs.level", {level.value for level in filters.levels}))
     if filters.terms:

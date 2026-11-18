@@ -33,8 +33,6 @@ def resolve_level(job: Job) -> tuple[JobLevel, Rejection | None]:
     from stage.classify.level import screen_level
 
     verdict = screen_level(job.title_raw, job.signals.employment_type, job.signals.category)
-    if verdict.rejected:
-        return JobLevel.UNKNOWN, Rejection(RejectionReason.NOT_EARLY_CAREER, verdict.matched_phrase)
     if verdict.level is JobLevel.INTERNSHIP and (ended := _term_ended(job)):
         return verdict.level, Rejection(RejectionReason.NOT_AN_INTERNSHIP, ended)
     return verdict.level, None

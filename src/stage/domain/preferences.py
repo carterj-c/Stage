@@ -17,7 +17,7 @@ CHOOSABLE_ROLES = tuple(
     role for role in RoleCategory if role not in (RoleCategory.HARDWARE, RoleCategory.UNKNOWN)
 )
 ALWAYS_ROLES = frozenset({RoleCategory.GENERAL_CS, RoleCategory.UNKNOWN})
-CHOOSABLE_LEVELS = tuple(level for level in JobLevel if level is not JobLevel.UNKNOWN)
+CHOOSABLE_LEVELS = tuple(JobLevel)
 COVERED_BY = {LocationBucket.CANADA: (LocationBucket.MONTREAL,)}
 COMPANY_SEPARATOR = "; "
 

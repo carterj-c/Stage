@@ -608,7 +608,14 @@ async def test_prompts_and_autocomplete_exist_without_actions(stored: Path) -> N
         completed = await client.complete(
             PromptReference(type="ref/prompt", name="find_matches"), {"name": "role", "value": "s"}
         )
-    assert len(prompts) == 5 and completed.completion.values == ["swe", "security", "general-cs"]
+    assert len(prompts) == 5 and completed.completion.values == [
+        "swe",
+        "security",
+        "general-cs",
+        "investment-research",
+        "investment-banking",
+        "risk",
+    ]
 
 
 async def test_export_postings_still_exports_with_a_damaged_tracker(

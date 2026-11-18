@@ -291,6 +291,7 @@ def internship_lexicon() -> InternshipLexicon:
 @dataclass(frozen=True, slots=True)
 class LevelLexicon:
     seniority: frozenset[str]
+    mid: frozenset[str]
     blocked: frozenset[str]
     new_grad: frozenset[str]
     entry: frozenset[str]
@@ -309,6 +310,7 @@ def level_lexicon() -> LevelLexicon:
     payload, source = _load(LEVELS_FILE)
     lexicon = LevelLexicon(
         seniority=_folded_phrases(payload, "seniority", source),
+        mid=_optional_phrases(payload, "mid", source),
         blocked=_folded_phrases(payload, "blocked", source),
         new_grad=_folded_phrases(payload, "new_grad", source),
         entry=_folded_phrases(payload, "entry", source),
@@ -567,3 +569,21 @@ def employer_aliases() -> dict[str, str]:
         return {}
     named = _folded_aliases(payload, "employer_aliases", source)
     return {spelling: fold(canonical) for spelling, canonical in named.items()}
+
+
+@lru_cache(maxsize=1)
+def occupation_lexicon() -> dict[str, frozenset[str]]:
+    payload, source = _load(ROLES_FILE)
+    return {
+        key.replace(" ", "-"): phrases
+        for key, phrases in _phrase_map(payload, "occupations", source).items()
+    }
+
+
+@lru_cache(maxsize=1)
+def occupation_negatives() -> dict[str, frozenset[str]]:
+    payload, source = _load(ROLES_FILE)
+    return {
+        key.replace(" ", "-"): phrases
+        for key, phrases in _phrase_map(payload, "occupation_negatives", source).items()
+    }

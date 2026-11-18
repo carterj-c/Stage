@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from stage.domain import JobLevel, RateState, RejectionReason
+from stage.domain import JobLevel, RateState
 from stage.http import BucketBlockedError, HttpClient, profile
 from stage.services.screening import normalize_batch
 from stage.sources import get_feeds
@@ -313,12 +313,10 @@ async def test_new_grad_rows_are_kept_at_their_level_whatever_the_title_says(
         "Software Engineer": JobLevel.NEW_GRAD,
         "Junior Software Engineer": JobLevel.ENTRY,
         "Software Engineer, New Grad": JobLevel.NEW_GRAD,
+        "Senior Software Engineer": JobLevel.SENIOR,
+        "Software Dev Engineer II": JobLevel.UNKNOWN,
     }
-    assert {entry.reason for entry in rejected} == {RejectionReason.NOT_EARLY_CAREER}
-    assert {entry.title_raw for entry in rejected} == {
-        "Senior Software Engineer",
-        "Software Dev Engineer II",
-    }
+    assert not rejected
 
 
 @respx.mock

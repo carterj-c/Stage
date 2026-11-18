@@ -394,7 +394,7 @@ async def test_a_board_whose_or_works_is_then_searched_for_new_grad_roles() -> N
     levels = {job.title_raw: screen_level(job.title_raw).level for job in result.jobs}
     assert levels["Software Engineer, New Grad"] is JobLevel.NEW_GRAD
     assert levels["Junior Developer"] is JobLevel.ENTRY
-    assert levels["Senior Software Engineer"] is JobLevel.UNKNOWN
+    assert levels["Senior Software Engineer"] is JobLevel.SENIOR
     assert {job.signals.employment_type for job in result.jobs} == {""}
     assert "internships and new-grad roles" in result.degraded
     assert DetailFetch(id=f"{SEARCH_PREFIX}workday:big-careers") in result.detail_fetches
