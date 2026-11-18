@@ -19,7 +19,12 @@ from stage.domain import (
     source_rank,
 )
 from stage.domain.liveness import CHECK_PREFIX
-from stage.domain.visits import FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, FEED_REJECTION_PREFIX
+from stage.domain.visits import (
+    FEED_DECISION_PREFIX,
+    FEED_DETAIL_PREFIX,
+    FEED_PENDING_PREFIX,
+    FEED_REJECTION_PREFIX,
+)
 from stage.storage.rows import CLOSED, OPEN, UPSERT_DETAIL, UPSERT_HEIR, UPSERT_TOMBSTONE
 from stage.storage.sql import (
     EACH,
@@ -191,7 +196,12 @@ def _forget_checks(conn: sqlite3.Connection, leaving: Sequence[str]) -> None:
         "(SELECT 1 FROM jobs j WHERE j.id = substr(detail_fetches.id, ?))",
         (starting(CHECK_PREFIX), len(CHECK_PREFIX) + 1),
     )
-    for prefix in (FEED_DETAIL_PREFIX, FEED_REJECTION_PREFIX, FEED_DECISION_PREFIX):
+    for prefix in (
+        FEED_DETAIL_PREFIX,
+        FEED_REJECTION_PREFIX,
+        FEED_DECISION_PREFIX,
+        FEED_PENDING_PREFIX,
+    ):
         conn.execute(
             "DELETE FROM detail_fetches WHERE id GLOB ? AND NOT EXISTS "
             "(SELECT 1 FROM jobs j WHERE j.id = substr(detail_fetches.id, ?)) "
@@ -202,6 +212,7 @@ def _forget_checks(conn: sqlite3.Connection, leaving: Sequence[str]) -> None:
         FEED_DETAIL_PREFIX,
         FEED_REJECTION_PREFIX,
         FEED_DECISION_PREFIX,
+        FEED_PENDING_PREFIX,
         CHECK_PREFIX,
         HELD_CLOSE_PREFIX,
         FULL_READ_PREFIX,

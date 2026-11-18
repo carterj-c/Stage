@@ -20,7 +20,12 @@ from stage.domain import (
 )
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
 from stage.domain.text import is_workday_opening
-from stage.domain.visits import FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, FEED_REJECTION_PREFIX
+from stage.domain.visits import (
+    FEED_DECISION_PREFIX,
+    FEED_DETAIL_PREFIX,
+    FEED_PENDING_PREFIX,
+    FEED_REJECTION_PREFIX,
+)
 from stage.storage.copies import (
     copies_of_rejected,
     duplicate_candidates,
@@ -43,6 +48,7 @@ from stage.storage.rows import (
     UPSERT_VISIT,
     job_from,
     job_params,
+    quarantined_from,
     quarantined_params,
     rate_state_params,
     stored_locations,
@@ -444,13 +450,16 @@ def _hold_feed_rejections(conn: sqlite3.Connection, batch: SourceBatch) -> Sourc
         str(row["id"])
         for row in conn.execute(
             f"SELECT q.id FROM quarantine q WHERE q.id IN {EACH} AND q.source = ? "
-            f"AND {verified_feed_hold('q')}",
+            f"AND ({verified_feed_hold('q')} OR (? = 0 AND EXISTS "
+            "(SELECT 1 FROM detail_fetches p WHERE p.id = ? || q.id)))",
             (
                 listed(incoming),
                 batch.source,
                 FEED_REJECTION_PREFIX,
                 FEED_DECISION_PREFIX,
                 FEED_DETAIL_PREFIX,
+                int(batch.feed_source),
+                FEED_PENDING_PREFIX,
             ),
         )
     }
@@ -473,6 +482,23 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
         row = conn.execute("SELECT * FROM jobs WHERE id = ?", (expected.id,)).fetchone()
         if row is not None and job_from(row) == expected:
             allowed.add(expected.id)
+    for expected_pending in batch.pending_expected:
+        row = conn.execute(
+            "SELECT q.* FROM quarantine q JOIN detail_fetches p ON p.id = ? || q.id "
+            "JOIN source_visits v ON v.source = q.source AND v.board = q.source "
+            "WHERE q.id = ? AND q.source = 'hanzili' AND p.resolved = 1 AND p.failed = 0 "
+            "AND v.last_success_at IS NOT NULL AND v.consecutive_failures = 0 "
+            f"AND NOT {verified_feed_hold('q')}",
+            (
+                FEED_PENDING_PREFIX,
+                expected_pending.id,
+                FEED_REJECTION_PREFIX,
+                FEED_DECISION_PREFIX,
+                FEED_DETAIL_PREFIX,
+            ),
+        ).fetchone()
+        if row is not None and quarantined_from(row) == expected_pending:
+            allowed.add(expected_pending.id)
     return replace(
         batch,
         jobs=tuple(job for job in batch.jobs if job.id in allowed),
@@ -491,6 +517,8 @@ def _protect_screened_feed_rows(
     if batch.rejection_expected is None or not (batch.jobs or batch.quarantined):
         return batch, (), 0
     expected = {job.id: job for job in batch.rejection_expected}
+    feed_expected = {job.id: job for job in (batch.feed_expected or ())}
+    quarantine_expected = {entry.id: entry for entry in batch.feed_quarantine_expected}
     screened = {job.id: job for job in batch.rejection_screened}
     verified: list[str] = []
     blocked: set[str] = set()
@@ -499,6 +527,20 @@ def _protect_screened_feed_rows(
     accepted = {entry.id: entry for entry in batch.jobs}
     identities = [entry.id for entry in batch.jobs] + [entry.id for entry in batch.quarantined]
     for ident in identities:
+        if batch.feed_expected is not None:
+            latest = conn.execute("SELECT * FROM jobs WHERE id = ?", (ident,)).fetchone()
+            current_feed = job_from(latest) if latest is not None else None
+            current_rejected = conn.execute(
+                "SELECT * FROM quarantine WHERE id = ?", (ident,)
+            ).fetchone()
+            current_quarantine = (
+                quarantined_from(current_rejected) if current_rejected is not None else None
+            )
+            if current_feed != feed_expected.get(
+                ident
+            ) or current_quarantine != quarantine_expected.get(ident):
+                blocked.add(ident)
+                continue
         row = conn.execute(
             "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = ? || j.id "
             "JOIN detail_fetches f ON f.id = ? || j.id "
@@ -540,7 +582,7 @@ def _protect_screened_feed_rows(
         if batch.feed_source:
             conn.execute("DELETE FROM http_cache WHERE source = ?", (batch.source,))
             conn.execute("DELETE FROM source_visits WHERE source = ?", (batch.source,))
-            batch = replace(batch, validators=(), visits=(), detail_fetches=())
+            batch = replace(batch, validators=(), visits=(), detail_fetches=(), board_urls=())
     return batch, tuple(verified), len(blocked)
 
 
@@ -634,6 +676,23 @@ class BatchWriter(Store):
             remember_heirs(conn, sorted(promoted.items()), stamp)
             heirs = {**heirs, **promoted}
             linked = _link_duplicates(conn, batch.resolve_duplicates, jobs)
+            if batch.feed_source and batch.board_urls:
+                conn.execute(
+                    "UPDATE detail_fetches SET resolved = 0 WHERE source = ? AND id GLOB ?",
+                    (batch.source, FEED_PENDING_PREFIX + "*"),
+                )
+            if batch.hydration_expected is not None and batch.pending_expected:
+                completed = [
+                    entry.id.removeprefix(FEED_DETAIL_PREFIX)
+                    for entry in batch.detail_fetches
+                    if entry.id.startswith(FEED_DETAIL_PREFIX)
+                    and entry.resolved
+                    and not entry.failed
+                ]
+                conn.execute(
+                    f"DELETE FROM detail_fetches WHERE id IN {EACH}",
+                    (listed(FEED_PENDING_PREFIX + ident for ident in completed),),
+                )
             _record_reads(conn, batch, stamp, held_urls)
         updated = sum(1 for job in jobs if seen.get(job.id, _UNSEEN).listed is not None)
         return SourceBatchResult(

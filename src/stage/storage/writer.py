@@ -112,10 +112,18 @@ class AsyncRepository:
         return await self._writer.run(lambda repository: repository.stale_members(source, before))
 
     async def feed_hydration_queue(
-        self, sources: Collection[str], now: datetime, limit: int, *, offset: int = 0
-    ) -> list[Job]:
+        self,
+        sources: Collection[str],
+        now: datetime,
+        limit: int,
+        *,
+        offset: int = 0,
+        pending_sources: Collection[str] | None = None,
+    ) -> list[Job | QuarantinedJob]:
         return await self._writer.run(
-            lambda repository: repository.feed_hydration_queue(sources, now, limit, offset=offset)
+            lambda repository: repository.feed_hydration_queue(
+                sources, now, limit, offset=offset, pending_sources=pending_sources
+            )
         )
 
     async def detail_queue(self, source: str, limit: int) -> list[str]:
@@ -123,6 +131,15 @@ class AsyncRepository:
 
     async def detail_queue_size(self, source: str) -> int:
         return await self._writer.run(lambda repository: repository.detail_queue_size(source))
+
+    async def feed_quarantined(self, ids: Collection[str]) -> list[QuarantinedJob]:
+        return await self._writer.run(lambda repository: repository.feed_quarantined(ids))
+
+    async def feed_pending_ids(self, ids: Collection[str]) -> set[str]:
+        return await self._writer.run(lambda repository: repository.feed_pending_ids(ids))
+
+    async def feed_jobs(self, ids: Collection[str]) -> list[Job]:
+        return await self._writer.run(lambda repository: repository.feed_jobs(ids))
 
     async def verified_feed_jobs(self, ids: Collection[str]) -> list[Job]:
         return await self._writer.run(lambda repository: repository.verified_feed_jobs(ids))

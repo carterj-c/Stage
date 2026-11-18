@@ -69,6 +69,9 @@ class SourceBatch:
 
     closes_whole_source: bool = False
     feed_source: bool = False
+    feed_expected: tuple[Job, ...] | None = None
+    feed_quarantine_expected: tuple[QuarantinedJob, ...] = ()
+    pending_expected: tuple[QuarantinedJob, ...] = ()
     list_sources: frozenset[str] = frozenset()
     hydration_expected: tuple[Job, ...] | None = None
     rejection_expected: tuple[Job, ...] | None = None
@@ -107,14 +110,29 @@ class Repository(Protocol):
         pass
 
     def feed_hydration_queue(
-        self, sources: Collection[str], now: datetime, limit: int, *, offset: int = 0
-    ) -> list[Job]:
+        self,
+        sources: Collection[str],
+        now: datetime,
+        limit: int,
+        *,
+        offset: int = 0,
+        pending_sources: Collection[str] | None = None,
+    ) -> list[Job | QuarantinedJob]:
         pass
 
     def detail_queue(self, source: str, limit: int) -> list[str]:
         pass
 
     def detail_queue_size(self, source: str) -> int:
+        pass
+
+    def feed_quarantined(self, ids: Collection[str]) -> list[QuarantinedJob]:
+        pass
+
+    def feed_pending_ids(self, ids: Collection[str]) -> set[str]:
+        pass
+
+    def feed_jobs(self, ids: Collection[str]) -> list[Job]:
         pass
 
     def verified_feed_jobs(self, ids: Collection[str]) -> list[Job]:

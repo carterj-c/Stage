@@ -36,6 +36,7 @@ from stage.domain import (
     Job,
     PlannedRequest,
     RateState,
+    RejectionReason,
     RequestLogged,
     Rotation,
     RotationMember,
@@ -64,7 +65,9 @@ from stage.domain import (
     rotate,
     turned_away,
 )
+from stage.domain.liveness import AWAITING_PAGE
 from stage.domain.text import counted, counts_locations, did_you_mean, plain_error
+from stage.domain.visits import FEED_PENDING_PREFIX
 from stage.http import (
     CEILING_BACKSTOP,
     REFRESH_SLACK_H,
@@ -967,24 +970,80 @@ async def _persist_source_batch(
     repository: AsyncRepository, screener: Screener, batch: SourceBatch, collected: Sequence[Job]
 ) -> tuple[SourceBatchResult, float, float]:
     normalize_clock = time.perf_counter()
-    expected = (
-        await repository.verified_feed_jobs([job.id for job in collected]) if collected else []
+    ids = [job.id for job in collected]
+    feed_snapshot = await repository.feed_jobs(ids) if batch.feed_source and ids else []
+    feed_quarantine = await repository.feed_quarantined(ids) if batch.feed_source and ids else []
+    pending_ids = (
+        await repository.feed_pending_ids(ids) if batch.source == "hanzili" and ids else set()
     )
-    screened = await _with_stored_details(repository, collected)
-    verified = {entry.id: entry for entry in expected} if batch.feed_source else {}
-    incoming = {entry.id: entry.description for entry in collected}
-    if verified:
-        screened = tuple(
-            replace(
-                entry,
-                description=full.description,
-                feed_summary=incoming.get(entry.id) or full.feed_summary,
+    expected = await repository.verified_feed_jobs(ids) if ids else []
+    if batch.feed_source:
+        existing = {entry.id: entry for entry in feed_snapshot}
+        verified = {entry.id: entry for entry in expected}
+        prepared: list[Job] = []
+        for entry in collected:
+            old = existing.get(entry.id)
+            full = verified.get(entry.id)
+            carried = _carried(entry, (old.description, old.location_raw) if old else None)
+            summary = (
+                entry.description
+                or entry.feed_summary
+                or (old.feed_summary if old else "")
+                or (old.description if old and not full else "")
             )
-            if (full := verified.get(entry.id))
-            else entry
-            for entry in screened
-        )
+            prepared.append(
+                replace(
+                    carried,
+                    description=full.description if full else "",
+                    feed_summary=summary,
+                )
+            )
+        screened: Sequence[Job] = tuple(prepared)
+    else:
+        screened = await _with_stored_details(repository, collected)
     kept, rejected = await screener(screened)
+    if batch.feed_source and batch.source == "hanzili":
+        from stage.classify import screen_is_cs_role
+        from stage.services.hydration_targets import target_for_url
+
+        by_id = {entry.id: entry for entry in screened}
+        previous_jobs = {entry.id for entry in feed_snapshot}
+        previous_quarantine = {entry.id for entry in feed_quarantine}
+        pending: list[DetailFetch] = []
+        refreshed = []
+        for item in rejected:
+            candidate = by_id.get(item.id)
+            if candidate is None:
+                refreshed.append(item)
+                continue
+            target = target_for_url(candidate.apply_url_raw)
+            probe = screen_is_cs_role(replace(candidate, source="workday", description=""))
+            safe = (
+                candidate.id not in previous_jobs
+                and (candidate.id not in previous_quarantine or candidate.id in pending_ids)
+                and candidate.source_posted_at is None
+                and candidate.duplicate_of is None
+                and not candidate.description
+                and not candidate.signals.terms
+                and not candidate.signals.season
+                and not candidate.signals.sponsorship
+                and not candidate.signals.degrees
+                and item.reason in {RejectionReason.UNKNOWN_CS_ROLE, RejectionReason.NOT_A_CS_ROLE}
+                and target is not None
+                and target.provider != "ashby"
+                and probe is not None
+                and probe.reason is RejectionReason.UNKNOWN_CS_ROLE
+                and probe.matched_phrase.endswith(AWAITING_PAGE)
+            )
+            if safe and probe is not None:
+                refreshed.append(
+                    replace(item, reason=probe.reason, matched_phrase=probe.matched_phrase)
+                )
+                pending.append(DetailFetch(FEED_PENDING_PREFIX + item.id, resolved=True))
+            else:
+                refreshed.append(item)
+        rejected = tuple(refreshed)
+        batch = replace(batch, detail_fetches=(*batch.detail_fetches, *pending))
     normalize_ms = _since(normalize_clock)
     write_clock = time.perf_counter()
     counts = await repository.apply_source_batch(
@@ -994,6 +1053,8 @@ async def _persist_source_batch(
             quarantined=rejected,
             rejection_expected=tuple(expected),
             rejection_screened=tuple(screened),
+            feed_expected=tuple(feed_snapshot) if batch.feed_source else None,
+            feed_quarantine_expected=tuple(feed_quarantine),
         )
     )
     if counts.successors:
@@ -1581,6 +1642,11 @@ async def sync(
                 budgets=budgets,
                 postures=postures,
                 rng=shuffler,
+                pending_sources=tuple(
+                    source
+                    for source in feeds
+                    if source not in set(ledger.failed) | set(ledger.blocked) | set(ledger.deferred)
+                ),
             )
             for record in hydrated.requests:
                 yield record

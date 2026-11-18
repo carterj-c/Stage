@@ -21,7 +21,7 @@ from stage.classify import (
     to_quarantined,
 )
 from stage.classify.scope import Rejection
-from stage.domain import DegreeRequirement, Job, QuarantinedJob
+from stage.domain import DegreeRequirement, Job, QuarantinedJob, RejectionReason, RoleCategory
 from stage.normalize import (
     canonical_apply_url,
     detect_language,
@@ -107,14 +107,37 @@ def combine_summary_evidence(job: Job, rejection: Rejection | None) -> tuple[Job
     summary, summary_rejection = _normalize_one(
         replace(job, description=job.feed_summary, feed_summary="")
     )
+    role_reasons = {RejectionReason.NOT_A_CS_ROLE, RejectionReason.UNKNOWN_CS_ROLE}
+    full_role = screen_is_cs_role(job)
+    summary_role = screen_is_cs_role(summary)
+    if rejection is not None and rejection.reason in role_reasons and summary_role is None:
+        rejection = None
+    if (
+        summary_rejection is not None
+        and summary_rejection.reason in role_reasons
+        and full_role is None
+    ):
+        summary_rejection = None
+    restrictive = next(
+        (
+            item
+            for item in (rejection, summary_rejection)
+            if item is not None and item.reason not in role_reasons
+        ),
+        None,
+    )
+    role = job.role
+    if summary_role is None and (full_role is not None or role is RoleCategory.UNKNOWN):
+        role = summary.role
     degree = job.degree_requirement
     if _DEGREE_RANK[summary.degree_requirement] > _DEGREE_RANK[degree]:
         degree = summary.degree_requirement
     return replace(
         job,
+        role=role,
         degree_requirement=degree,
         work_auth_flag=job.work_auth_flag or summary.work_auth_flag,
-    ), rejection or summary_rejection
+    ), restrictive or rejection or summary_rejection
 
 
 def normalize_batch(jobs: Sequence[Job]) -> Screened:

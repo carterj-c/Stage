@@ -1,6 +1,6 @@
 import random
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1590,3 +1590,877 @@ async def test_rescreen_does_not_count_held_durable_evidence_as_released(db_path
             held.verified_description,
             held.feed_summary,
         )
+
+
+@pytest.mark.parametrize("technical", ["body", "summary"])
+def test_role_qualification_combines_positive_evidence_without_masking_requirements(
+    technical: str,
+) -> None:
+    from stage.services.screening import normalize_batch
+
+    engineering = "Develop backend software engineering systems."
+    neutral = "Hybrid position."
+    row = replace(
+        job(),
+        title_raw="Systems Engineer Intern",
+        title_normalized="Systems Engineer Intern",
+        description=engineering if technical == "body" else neutral,
+        feed_summary=engineering if technical == "summary" else neutral,
+    )
+    kept, rejected = normalize_batch((row,))
+    assert len(kept) == 1 and not rejected
+    assert kept[0].description == row.description and kept[0].feed_summary == row.feed_summary
+    phd = "Applicants must be enrolled in a PhD program."
+    restricted = (
+        replace(row, feed_summary=phd) if technical == "body" else replace(row, description=phd)
+    )
+    _, rejected = normalize_batch((restricted,))
+    assert len(rejected) == 1 and "phd" in rejected[0].matched_phrase
+    auth = "Must be a US citizen."
+    restricted = (
+        replace(row, feed_summary=auth) if technical == "body" else replace(row, description=auth)
+    )
+    kept, rejected = normalize_batch((restricted,))
+    assert len(kept) == 1 and not rejected and kept[0].work_auth_flag
+
+
+@respx.mock
+@pytest.mark.parametrize("target", ["greenhouse", "failed", "unsupported"])
+async def test_fresh_hanzili_summary_is_never_a_complete_posting(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    apply_url = (
+        "https://example.com/acme/job"
+        if target == "unsupported"
+        else "https://boards.greenhouse.io/acme/jobs/123"
+    )
+    body = (
+        "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| Software Engineer Intern | Acme | Hybrid position | Company | Intern | "
+        f"Toronto, ON | [Apply]({apply_url}) |\n"
+    )
+    respx.get(feed.plan(NOW)[0]).respond(200, text=body)
+    route = respx.get(GH + "123").mock(
+        return_value=(
+            httpx.Response(404, json={"error": "missing"})
+            if target == "failed"
+            else httpx.Response(200, json=payload(body="Build software. Must be a US citizen."))
+        )
+    )
+    async with open_repository(db_path) as repo:
+        events = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        rows = await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        assert len(rows) == 1
+        assert rows[0].feed_summary == "Hybrid position"
+        if target == "greenhouse":
+            assert rows[0].description == "Build software. Must be a US citizen."
+            assert rows[0].work_auth_flag
+        else:
+            assert rows[0].description == ""
+        assert isinstance(events[-1], SyncFinished)
+    assert route.call_count == (0 if target == "unsupported" else 1)
+
+
+@respx.mock
+async def test_fresh_ambiguous_hanzili_row_can_be_hydrated_before_role_decision(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    body = (
+        "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| Systems Engineer Intern | Acme | Hybrid position | Company | Intern | "
+        "Toronto, ON | [Apply](https://boards.greenhouse.io/acme/jobs/123) |\n"
+    )
+    respx.get(feed.plan(NOW)[0]).respond(200, text=body)
+    route = respx.get(GH + "123").respond(
+        200,
+        json=payload(body="Develop backend software engineering systems."),
+    )
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        rows = await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        assert len(rows) == 1
+        assert rows[0].description == "Develop backend software engineering systems."
+        assert rows[0].feed_summary == "Hybrid position"
+        assert not await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        from stage.services.maintenance import rescreen
+
+        await rescreen(repo, now=NOW + timedelta(hours=1))
+        rows = await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        assert len(rows) == 1 and rows[0].feed_summary == "Hybrid position"
+    assert route.call_count == 1
+
+
+def ambiguous_hanzili_markdown(summary: str = "Hybrid position") -> str:
+    return (
+        "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        f"| Systems Engineer Intern | Acme | {summary} | Company | Intern | "
+        "Toronto, ON | [Apply](https://boards.greenhouse.io/acme/jobs/123) |\n"
+    )
+
+
+@respx.mock
+async def test_pending_hanzili_retry_after_feed_304_keeps_summary_hidden_until_complete(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    feed_route = respx.get(feed.plan(NOW)[0]).mock(
+        side_effect=[
+            httpx.Response(200, text=ambiguous_hanzili_markdown(), headers={"ETag": '"first"'}),
+            httpx.Response(304),
+        ]
+    )
+    detail = respx.get(GH + "123").mock(
+        side_effect=[
+            httpx.Response(404, json={"error": "not found"}),
+            httpx.Response(200, json=payload(body="Develop backend software engineering systems.")),
+        ]
+    )
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        pending = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(pending) == 1 and pending[0].feed_summary == "Hybrid position"
+        assert "waiting for its job page" in pending[0].matched_phrase
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW + timedelta(hours=2),
+                close_orphans=False,
+                still_open=False,
+                force_refresh=True,
+            )
+        ]
+        rows = await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        assert len(rows) == 1 and rows[0].feed_summary == "Hybrid position"
+        assert rows[0].description == "Develop backend software engineering systems."
+        assert not await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+    assert detail.call_count == 2
+    assert feed_route.calls[1].request.headers["if-none-match"] == '"first"'
+
+
+@respx.mock
+async def test_pending_hanzili_removed_from_feed_is_never_promoted(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    respx.get(feed.plan(NOW)[0]).mock(
+        side_effect=[
+            httpx.Response(200, text=ambiguous_hanzili_markdown()),
+            httpx.Response(200, text="_No roles currently available_"),
+        ]
+    )
+    detail = respx.get(GH + "123").respond(404, json={"error": "not found"})
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        detail.respond(200, json=payload(body="Develop backend software engineering systems."))
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW + timedelta(hours=2),
+                close_orphans=False,
+                still_open=False,
+                force_refresh=True,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        pending = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(pending) == 1 and pending[0].feed_summary == "Hybrid position"
+    assert detail.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("change", ["membership", "summary", "source_failure"])
+async def test_pending_hanzili_membership_change_during_fetch_blocks_promotion(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.domain.visits import FEED_PENDING_PREFIX
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    respx.get(feed.plan(NOW)[0]).respond(200, text=ambiguous_hanzili_markdown())
+
+    def remove_during_fetch(request: httpx.Request) -> httpx.Response:
+        with sqlite3.connect(db_path) as conn:
+            if change == "membership":
+                conn.execute(
+                    "UPDATE detail_fetches SET resolved = 0 WHERE id LIKE ?",
+                    (FEED_PENDING_PREFIX + "%",),
+                )
+            elif change == "summary":
+                conn.execute(
+                    "UPDATE quarantine SET feed_summary = ? WHERE source = ?",
+                    ("Applicants must be enrolled in a PhD program.", "hanzili"),
+                )
+            else:
+                conn.execute(
+                    "UPDATE source_visits SET consecutive_failures = 1 WHERE source = ?",
+                    ("hanzili",),
+                )
+        return httpx.Response(
+            200, json=payload(body="Develop backend software engineering systems.")
+        )
+
+    route = respx.get(GH + "123").mock(side_effect=remove_during_fetch)
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        pending = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(pending) == 1
+        assert pending[0].feed_summary == (
+            "Applicants must be enrolled in a PhD program."
+            if change == "summary"
+            else "Hybrid position"
+        )
+        with sqlite3.connect(db_path) as conn:
+            assert (
+                conn.execute(
+                    "SELECT count(*) FROM detail_fetches WHERE id = ?",
+                    (FEED_REJECTION_PREFIX + pending[0].id,),
+                ).fetchone()[0]
+                == 0
+            )
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_ambiguous_hanzili_summary_phd_rejects_before_hydration(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    respx.get(feed.plan(NOW)[0]).respond(
+        200,
+        text=ambiguous_hanzili_markdown(
+            "Applicants must be enrolled in a PhD program.",
+        ),
+    )
+    route = respx.get(GH + "123").respond(200, json=payload())
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        rejected = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(rejected) == 1 and rejected[0].reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+        assert "PhD" in rejected[0].feed_summary
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_removed_pending_hanzili_cannot_be_released_by_rules_rescreen(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.services import maintenance
+    from stage.services.screening import normalize_batch
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    respx.get(feed.plan(NOW)[0]).mock(
+        side_effect=[
+            httpx.Response(200, text=ambiguous_hanzili_markdown()),
+            httpx.Response(200, text="_No roles currently available_"),
+        ]
+    )
+    respx.get(GH + "123").respond(404, json={"error": "not found"})
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW + timedelta(hours=2),
+                close_orphans=False,
+                still_open=False,
+                force_refresh=True,
+            )
+        ]
+        summary = await repo.list_quarantined(
+            QuarantineFilters(
+                source="hanzili",
+                reason=RejectionReason.UNKNOWN_CS_ROLE,
+            )
+        )
+        assert len(summary) == 1
+
+        def permissive(jobs: Sequence[Job]) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+            return normalize_batch(
+                tuple(
+                    replace(
+                        entry,
+                        title_raw="Software Engineer Intern",
+                        title_normalized="Software Engineer Intern",
+                    )
+                    for entry in jobs
+                )
+            )
+
+        monkeypatch.setattr("stage.services.screening.normalize_batch", permissive)
+        result = await maintenance.rescreen(repo, now=NOW + timedelta(hours=3))
+        assert result.released == 0
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        assert len(await repo.list_quarantined(QuarantineFilters(source="hanzili"))) == 1
+
+
+def test_positive_role_evidence_cannot_override_a_hard_title_exclusion() -> None:
+    from stage.services.screening import normalize_batch
+
+    row = replace(
+        job(),
+        title_raw="Marketing Intern",
+        title_normalized="Marketing Intern",
+        description="Software engineering and computer science.",
+        feed_summary="Hybrid position.",
+    )
+    kept, rejected = normalize_batch((row,))
+    assert not kept and len(rejected) == 1
+
+
+@respx.mock
+async def test_pending_hanzili_is_not_promoted_when_feed_read_fails(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    respx.get(feed.plan(NOW)[0]).mock(
+        side_effect=[
+            httpx.Response(200, text=ambiguous_hanzili_markdown()),
+            httpx.Response(404),
+        ]
+    )
+    detail = respx.get(GH + "123").respond(404, json={"error": "not found"})
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        detail.respond(200, json=payload(body="Develop backend software engineering systems."))
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW + timedelta(hours=2),
+                close_orphans=False,
+                still_open=False,
+                force_refresh=True,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        pending = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(pending) == 1 and pending[0].feed_summary == "Hybrid position"
+    assert detail.call_count == 1
+
+
+@respx.mock
+async def test_pending_and_regular_feed_hydration_share_budget_fairly(db_path: Path) -> None:
+    from stage.domain import CompanyVisit, DetailFetch, RejectionReason
+    from stage.domain.visits import FEED_PENDING_PREFIX
+
+    active = tuple(
+        replace(
+            job(number),
+            id=f"hanzili:acme:{number}",
+            source="hanzili",
+            first_seen=NOW - timedelta(days=10),
+        )
+        for number in range(100, 140)
+    )
+    pending = tuple(
+        QuarantinedJob(
+            id=f"hanzili:acme:{number}",
+            source="hanzili",
+            company="Acme",
+            title_raw="Systems Engineer Intern",
+            reason=RejectionReason.UNKNOWN_CS_ROLE,
+            matched_phrase="systems engineer, waiting for its job page",
+            first_seen=NOW,
+            last_seen=NOW,
+            apply_url_raw=f"https://boards.greenhouse.io/acme/jobs/{number}",
+            feed_summary="Hybrid position",
+            employment_type="internship",
+        )
+        for number in range(200, 240)
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                jobs=active,
+                quarantined=pending,
+                detail_fetches=tuple(
+                    DetailFetch(FEED_PENDING_PREFIX + entry.id, resolved=True) for entry in pending
+                ),
+                visits=(CompanyVisit(board="hanzili", succeeded=True),),
+            )
+        )
+        selected = await repo.feed_hydration_queue(["hanzili"], NOW, 30)
+        assert sum(isinstance(entry, QuarantinedJob) for entry in selected) == 15
+        assert sum(isinstance(entry, Job) for entry in selected) == 15
+        route = respx.route(host="boards-api.greenhouse.io").respond(404)
+        screener = Screener()
+        try:
+            result = await feed_hydration.hydrate_feeds(
+                repo,
+                ["hanzili"],
+                screener,
+                now=NOW,
+                budgets={},
+                postures={},
+                rng=random.Random(1),
+            )
+        finally:
+            screener.close()
+        assert route.call_count == len(result.requests) == 30
+        with sqlite3.connect(db_path) as conn:
+            attempted = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT id FROM detail_fetches WHERE id LIKE ?",
+                    (FEED_DETAIL_PREFIX + "%",),
+                )
+            }
+        assert sum(FEED_DETAIL_PREFIX + entry.id in attempted for entry in active) == 15
+        assert sum(FEED_DETAIL_PREFIX + entry.id in attempted for entry in pending) == 15
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "body", ["Electrical hardware testing.", "Applicants must be enrolled in a PhD program."]
+)
+async def test_pending_hanzili_detail_rejection_stays_hidden_and_stores_full_evidence(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    respx.get(feed.plan(NOW)[0]).respond(200, text=ambiguous_hanzili_markdown())
+    route = respx.get(GH + "123").respond(200, json=payload(body=body))
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        rejected = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(rejected) == 1
+        assert rejected[0].verified_description == body
+        assert rejected[0].feed_summary == "Hybrid position"
+        with sqlite3.connect(db_path) as conn:
+            assert (
+                conn.execute(
+                    "SELECT count(*) FROM detail_fetches WHERE id = ?",
+                    (FEED_REJECTION_PREFIX + rejected[0].id,),
+                ).fetchone()[0]
+                == 1
+            )
+        await hydrate(repo, NOW + timedelta(hours=3))
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_pending_hanzili_retains_summary_restriction_after_hydration_and_rescreen(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.services.maintenance import rescreen
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    summary = "Hybrid position. Must be a US citizen."
+    respx.get(feed.plan(NOW)[0]).respond(200, text=ambiguous_hanzili_markdown(summary))
+    respx.get(GH + "123").respond(
+        200, json=payload(body="Develop backend software engineering systems.")
+    )
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        await rescreen(repo, now=NOW + timedelta(hours=1))
+        rows = await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        assert len(rows) == 1 and rows[0].work_auth_flag
+        assert rows[0].feed_summary == summary
+        assert rows[0].description == "Develop backend software engineering systems."
+
+
+@respx.mock
+async def test_existing_unrelated_quarantine_is_not_treated_as_fresh_pending(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import RejectionReason
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    markdown = ambiguous_hanzili_markdown()
+    parsed, _ = feed.rows(markdown)
+    candidate = feed._to_job(parsed[0], NOW)
+    old = QuarantinedJob(
+        id=candidate.id,
+        source="hanzili",
+        company=candidate.company,
+        title_raw=candidate.title_raw,
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase="phd required",
+        first_seen=NOW - timedelta(days=10),
+        last_seen=NOW,
+        apply_url_raw=candidate.apply_url_raw,
+        location_raw=candidate.location_raw,
+        feed_summary="Applicants must be enrolled in a PhD program.",
+    )
+    respx.get(feed.plan(NOW)[0]).respond(200, text=markdown)
+    route = respx.get(GH + "123").respond(200, json=payload())
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(source="hanzili", run_started_at=NOW, quarantined=(old,))
+        )
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert await repo.get_job(old.id) is None
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_pending_hanzili_failed_detail_attempts_remain_bounded(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    respx.get(feed.plan(NOW)[0]).respond(200, text=ambiguous_hanzili_markdown())
+    detail = respx.get(GH + "123").respond(404, json={"error": "missing"})
+
+    def now_at(moment: datetime) -> Callable[[], datetime]:
+        def current() -> datetime:
+            return moment
+
+        return current
+
+    async with open_repository(db_path) as repo:
+        for hours in (0, 2, 4, 6, 8):
+            moment = NOW + timedelta(hours=hours)
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [],
+                    sources=["hanzili"],
+                    now_fn=now_at(moment),
+                    close_orphans=False,
+                    still_open=False,
+                )
+            ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        pending = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(pending) == 1 and pending[0].feed_summary == "Hybrid position"
+        with sqlite3.connect(db_path) as conn:
+            outcome = conn.execute(
+                "SELECT resolved, failed, attempts FROM detail_fetches WHERE id = ?",
+                (FEED_DETAIL_PREFIX + pending[0].id,),
+            ).fetchone()
+        assert outcome == (0, 1, 3)
+    assert detail.call_count == 3
+
+
+@respx.mock
+async def test_unverified_hanzili_summary_race_defers_feed_and_preserves_newer_evidence(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.services.screening import normalize_batch
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    markdown = (
+        "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| Software Engineer Intern | Acme | Hybrid position | Company | Intern | "
+        "Toronto, ON | [Apply](https://boards.greenhouse.io/acme/jobs/123) |\n"
+    )
+    feed_route = respx.get(feed.plan(NOW)[0]).respond(200, text=markdown, headers={"ETag": '"v1"'})
+    respx.get(GH + "123").respond(404, json={"error": "missing"})
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        initial = (await repo.list_jobs(JobFilters(source="hanzili", limit=None)))[0]
+        changed = False
+
+        def racing(jobs: Sequence[Job]) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+            nonlocal changed
+            result = normalize_batch(jobs)
+            if not changed:
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute(
+                        "UPDATE jobs SET feed_summary = ?, work_auth_flag = 1 WHERE id = ?",
+                        ("Must be a US citizen.", initial.id),
+                    )
+                changed = True
+            return result
+
+        monkeypatch.setattr("stage.services.screening.normalize_batch", racing)
+        events = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW + timedelta(hours=6),
+                close_orphans=False,
+                still_open=False,
+                force_refresh=True,
+            )
+        ]
+        stored = await repo.get_job(initial.id)
+        assert stored is not None and stored.feed_summary == "Must be a US citizen."
+        assert stored.work_auth_flag and stored.description == ""
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "partial"
+        assert not await repo.load_validators("hanzili")
+        events = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW + timedelta(hours=6, minutes=1),
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "success"
+        assert "if-none-match" not in feed_route.calls[-1].request.headers
+
+
+@respx.mock
+async def test_concurrent_quarantine_is_not_replaced_by_fresh_pending_hanzili(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.services.screening import normalize_batch
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    markdown = ambiguous_hanzili_markdown()
+    parsed, _ = feed.rows(markdown)
+    identity = feed._to_job(parsed[0], NOW).id
+    respx.get(feed.plan(NOW)[0]).respond(200, text=markdown, headers={"ETag": '"latest"'})
+    route = respx.get(GH + "123").respond(200, json=payload())
+    changed = False
+
+    def concurrent_screen(
+        jobs: Sequence[Job],
+    ) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+        nonlocal changed
+        result = normalize_batch(jobs)
+        if not changed:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO quarantine (id, source, company, title_raw, reason, "
+                    "matched_phrase, "
+                    "first_seen, last_seen, feed_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        identity,
+                        "hanzili",
+                        "Acme",
+                        "Systems Engineer Intern",
+                        "out-of-scope-degree",
+                        "phd required",
+                        NOW.isoformat(),
+                        NOW.isoformat(),
+                        "PhD required.",
+                    ),
+                )
+            changed = True
+        return result
+
+    async with open_repository(db_path) as repo:
+        monkeypatch.setattr("stage.services.screening.normalize_batch", concurrent_screen)
+        events = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: NOW,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        rejected = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(rejected) == 1 and rejected[0].reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+        assert rejected[0].feed_summary == "PhD required."
+        assert not await repo.load_validators("hanzili")
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "partial"
+    assert route.call_count == 0
