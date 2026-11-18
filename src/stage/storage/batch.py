@@ -485,45 +485,53 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
     )
 
 
-def _protect_screened_feed_rejections(
+def _protect_screened_feed_rows(
     conn: sqlite3.Connection, batch: SourceBatch
-) -> tuple[SourceBatch, tuple[str, ...]]:
-    if batch.rejection_expected is None or not batch.quarantined:
-        return batch, ()
+) -> tuple[SourceBatch, tuple[str, ...], int]:
+    if batch.rejection_expected is None or not (batch.jobs or batch.quarantined):
+        return batch, (), 0
     expected = {job.id: job for job in batch.rejection_expected}
     screened = {job.id: job for job in batch.rejection_screened}
     verified: list[str] = []
     blocked: set[str] = set()
-    for entry in batch.quarantined:
+    rejected_ids = {entry.id for entry in batch.quarantined}
+    identities = [entry.id for entry in batch.jobs] + [entry.id for entry in batch.quarantined]
+    for ident in identities:
         row = conn.execute(
             "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = ? || j.id "
             "JOIN detail_fetches f ON f.id = ? || j.id "
             "WHERE j.id = ? AND j.description <> '' AND d.resolved = 1 AND d.failed = 0 "
             "AND f.resolved = 1 AND f.failed = 0",
-            (FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, entry.id),
+            (FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, ident),
         ).fetchone()
-        if row is None and entry.id not in expected:
+        if row is None and ident not in expected:
             continue
         current = job_from(row) if row is not None else None
-        original, read = expected.get(entry.id), screened.get(entry.id)
+        original, read = expected.get(ident), screened.get(ident)
         if (
             current is None
             or original != current
             or read is None
             or not read.description
-            or read.description != current.description
+            or (ident in rejected_ids and read.description != current.description)
         ):
-            blocked.add(entry.id)
-        else:
-            verified.append(entry.id)
+            blocked.add(ident)
+        elif ident in rejected_ids:
+            verified.append(ident)
     if blocked:
         batch = replace(
             batch,
+            jobs=tuple(entry for entry in batch.jobs if entry.id not in blocked),
             quarantined=tuple(entry for entry in batch.quarantined if entry.id not in blocked),
             closable_boards=(),
+            unchanged_boards=(),
             closes_whole_source=False,
         )
-    return batch, tuple(verified)
+        if batch.feed_source:
+            conn.execute("DELETE FROM http_cache WHERE source = ?", (batch.source,))
+            conn.execute("DELETE FROM source_visits WHERE source = ?", (batch.source,))
+            batch = replace(batch, validators=(), visits=(), detail_fetches=())
+    return batch, tuple(verified), len(blocked)
 
 
 class BatchWriter(Store):
@@ -559,7 +567,7 @@ class BatchWriter(Store):
         stamp = to_text(started)
         with self._transaction() as conn:
             batch = _hold_feed_rejections(conn, _guard_hydration(conn, batch))
-            batch, verified_rejections = _protect_screened_feed_rejections(conn, batch)
+            batch, verified_rejections, conflicts = _protect_screened_feed_rows(conn, batch)
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
             known = _first_seen(seen, started)
@@ -614,4 +622,5 @@ class BatchWriter(Store):
                 (batch.source, OPEN),
             ),
             successors=tuple(sorted(heirs.items())),
+            conflicts=conflicts,
         )

@@ -1446,6 +1446,7 @@ async def _run_feed_source(
         SourceBatch(
             source=source,
             run_started_at=run_started_at,
+            feed_source=True,
             validators=validators,
             rate_state=settled,
             resolve_duplicates=resolve_duplicates,
@@ -1456,6 +1457,16 @@ async def _run_feed_source(
         ),
         harvest.collected,
     )
+    if counts.conflicts:
+        harvest.succeeded = False
+        harvest.deferred_boards += 1
+        if source in ledger.first_reads:
+            ledger.first_reads.remove(source)
+        yield CompanyDeferred(
+            source=source,
+            company=label,
+            reason="Posting changed during screening; the feed will be read again",
+        )
     yield ledger.settle(
         source,
         harvest,

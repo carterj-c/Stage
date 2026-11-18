@@ -1075,3 +1075,94 @@ async def test_later_rejection_does_not_override_concurrent_body_or_close_it(
         assert current.status is JobStatus.OPEN
         assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))
         assert rejection_marker(db_path) is None
+
+
+@respx.mock
+@pytest.mark.parametrize("decision", ["accept", "reject"])
+@pytest.mark.parametrize("initial", ["blank", "verified"])
+async def test_conflicted_feed_batch_retries_without_validator_or_recent_success(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+    initial: str,
+) -> None:
+    from stage.classify.scope import Rejection, to_quarantined
+    from stage.domain import CompanyVisit, DetailFetch, HttpValidator, RejectionReason
+    from stage.services.screening import normalize_batch
+    from stage.storage.sqlite_repo import SqliteRepository
+
+    requests: list[httpx.Request] = []
+
+    def feed_response(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.headers.get("if-none-match") == '"latest"':
+            return httpx.Response(304)
+        return httpx.Response(200, json={}, headers={"ETag": '"latest"'})
+
+    respx.get(FEED_URL).mock(side_effect=feed_response)
+    respx.get(GH + "123").respond(200, json=payload())
+    changed = False
+    async with open_repository(db_path) as repo:
+        await seed(repo, job())
+        if initial == "verified":
+            await hydrate(repo)
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="test-feed",
+                run_started_at=NOW - timedelta(days=1),
+                validators=(HttpValidator(url=FEED_URL, etag='"old"'),),
+                visits=(CompanyVisit(board="test-feed", succeeded=True),),
+            )
+        )
+
+        def concurrent_screen(
+            jobs: Sequence[Job],
+        ) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+            nonlocal changed
+            kept, rejected = normalize_batch(jobs)
+            if not changed:
+                other = SqliteRepository.connect(db_path)
+                try:
+                    snapshot = other.get_job(job().id)
+                    assert snapshot is not None
+                    other.apply_source_batch(
+                        SourceBatch(
+                            source="test-feed",
+                            run_started_at=NOW,
+                            jobs=(replace(snapshot, description="Newly hydrated full body"),),
+                            hydration_expected=(snapshot,),
+                            detail_fetches=(
+                                DetailFetch(FEED_DETAIL_PREFIX + snapshot.id, resolved=True),
+                            ),
+                        )
+                    )
+                finally:
+                    other.close()
+                changed = True
+            if decision == "reject":
+                return (), rejected + tuple(
+                    to_quarantined(
+                        entry, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "new rule")
+                    )
+                    for entry in kept
+                )
+            return kept, rejected
+
+        monkeypatch.setattr("stage.services.screening.normalize_batch", concurrent_screen)
+        events = await sync(repo)
+        current = await repo.get_job(job().id)
+        assert current is not None and current.description == "Newly hydrated full body"
+        assert current.status is JobStatus.OPEN
+        assert not await repo.list_quarantined(QuarantineFilters(source="test-feed"))
+        assert not await repo.load_validators("test-feed")
+        assert not [visit for visit in await repo.all_visits() if visit.source == "test-feed"]
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "partial"
+        assert len(requests) == 1 and requests[0].headers.get("if-none-match") == '"old"'
+        await sync(repo, NOW + timedelta(minutes=1))
+        assert len(requests) == 2 and "if-none-match" not in requests[1].headers
+        current = await repo.get_job(job().id)
+        if decision == "reject":
+            assert current is None
+            assert rejection_marker(db_path) == (1, 0)
+        else:
+            assert current is not None and current.description == "Newly hydrated full body"

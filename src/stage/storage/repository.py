@@ -68,6 +68,7 @@ class SourceBatch:
     resolve_duplicates: Resolver | None = None
 
     closes_whole_source: bool = False
+    feed_source: bool = False
     list_sources: frozenset[str] = frozenset()
     hydration_expected: tuple[Job, ...] | None = None
     rejection_expected: tuple[Job, ...] | None = None
@@ -86,6 +87,7 @@ class SourceBatchResult:
     duplicates: int = 0
     stored: int = 0
     successors: tuple[tuple[str, str], ...] = ()
+    conflicts: int = 0
 
 
 class Repository(Protocol):
