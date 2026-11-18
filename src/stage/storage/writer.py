@@ -112,10 +112,10 @@ class AsyncRepository:
         return await self._writer.run(lambda repository: repository.stale_members(source, before))
 
     async def feed_hydration_queue(
-        self, sources: Collection[str], now: datetime, limit: int
-    ) -> list[Job]:
+        self, sources: Collection[str], now: datetime, limit: int, *, offset: int = 0
+    ) -> list[Job | QuarantinedJob]:
         return await self._writer.run(
-            lambda repository: repository.feed_hydration_queue(sources, now, limit)
+            lambda repository: repository.feed_hydration_queue(sources, now, limit, offset=offset)
         )
 
     async def detail_queue(self, source: str, limit: int) -> list[str]:

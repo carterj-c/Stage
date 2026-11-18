@@ -2,7 +2,15 @@ import json
 from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime, timedelta
 
-from stage.domain import UNKNOWN_TERM, Job, RateState, RoleCategory, WorkdayCrawl, WorkdayFacet
+from stage.domain import (
+    UNKNOWN_TERM,
+    Job,
+    QuarantinedJob,
+    RateState,
+    RoleCategory,
+    WorkdayCrawl,
+    WorkdayFacet,
+)
 from stage.domain.liveness import (
     AWAITING_PAGE,
     BOARD_SOURCES,
@@ -18,6 +26,7 @@ from stage.storage.rows import (
     UPSERT_CHECK,
     UPSERT_PUSHBACK,
     job_from,
+    quarantined_from,
     rate_state_params,
 )
 from stage.storage.sql import EACH, Store, count, from_text, link_of, listed, to_text
@@ -64,24 +73,45 @@ def _queued(source: str) -> tuple[object, ...]:
 
 class DetailFetches(Store):
     def feed_hydration_queue(
-        self, sources: Collection[str], now: datetime, limit: int
-    ) -> list[Job]:
+        self, sources: Collection[str], now: datetime, limit: int, *, offset: int = 0
+    ) -> list[Job | QuarantinedJob]:
         rows = self._conn.execute(
-            "SELECT j.* FROM jobs j LEFT JOIN detail_fetches d ON d.id = ? || j.id "
+            "SELECT id, kind FROM ("
+            "SELECT j.id, 1 AS kind, coalesce(d.attempts, 0) AS attempts, j.first_seen "
+            "FROM jobs j LEFT JOIN detail_fetches d ON d.id = ? || j.id "
             f"WHERE j.source IN {EACH} AND j.status = ? AND j.description = '' "
             "AND (d.id IS NULL OR (d.resolved = 0 AND d.attempts < ? "
-            "AND d.fetched_at <= ?)) "
-            "ORDER BY coalesce(d.attempts, 0), j.first_seen DESC, j.id LIMIT ?",
+            "AND d.fetched_at <= ?)) UNION ALL "
+            "SELECT q.id, 0 AS kind, 0 AS attempts, q.first_seen "
+            "FROM quarantine q JOIN detail_fetches d ON d.id = ? || q.id "
+            f"WHERE q.source IN {EACH} AND d.fetched_at <= ?) "
+            "ORDER BY kind, attempts, first_seen DESC, id LIMIT ? OFFSET ?",
             (
                 FEED_DETAIL_PREFIX,
                 listed(sources),
                 OPEN,
                 MAX_DETAIL_ATTEMPTS,
                 to_text(now - timedelta(hours=1)),
+                FEED_DETAIL_PREFIX,
+                listed(sources),
+                to_text(now - timedelta(days=7)),
                 max(0, limit),
+                max(0, offset),
             ),
-        )
-        return [job_from(row) for row in rows]
+        ).fetchall()
+        candidates: list[Job | QuarantinedJob] = []
+        for row in rows:
+            if row["kind"] == 0:
+                rejected = self._conn.execute(
+                    "SELECT * FROM quarantine WHERE id = ?", (row["id"],)
+                ).fetchone()
+                if rejected is not None:
+                    candidates.append(quarantined_from(rejected))
+            else:
+                job = self._conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
+                if job is not None:
+                    candidates.append(job_from(job))
+        return candidates
 
     def detail_queue(self, source: str, limit: int) -> list[str]:
         rows = self._conn.execute(

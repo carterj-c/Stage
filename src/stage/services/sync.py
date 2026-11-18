@@ -1559,6 +1559,7 @@ async def sync(
                 stat = ledger.stats[index]
                 ledger.stats[index] = replace(
                     stat,
+                    added=stat.added + counts.added,
                     updated=stat.updated + counts.updated,
                     quarantined=stat.quarantined + counts.quarantined,
                 )

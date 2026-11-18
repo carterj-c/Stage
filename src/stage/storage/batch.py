@@ -43,6 +43,7 @@ from stage.storage.rows import (
     UPSERT_VISIT,
     job_from,
     job_params,
+    quarantined_from,
     quarantined_params,
     rate_state_params,
     stored_locations,
@@ -410,6 +411,32 @@ def _record_reads(
     )
 
 
+def _hold_feed_rejections(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
+    if batch.hydration_expected is not None:
+        return batch
+    incoming = {job.id: job.last_seen for job in batch.jobs}
+    incoming.update({entry.id: entry.last_seen for entry in batch.quarantined})
+    if not incoming:
+        return batch
+    held = {
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT q.id FROM quarantine q JOIN detail_fetches d ON d.id = ? || q.id "
+            f"WHERE q.id IN {EACH} AND q.source = ?",
+            (FEED_DETAIL_PREFIX, listed(incoming), batch.source),
+        )
+    }
+    conn.executemany(
+        "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
+        [(to_text(incoming[ident]), ident) for ident in held],
+    )
+    return replace(
+        batch,
+        jobs=tuple(job for job in batch.jobs if job.id not in held),
+        quarantined=tuple(entry for entry in batch.quarantined if entry.id not in held),
+    )
+
+
 def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
     if batch.hydration_expected is None:
         return batch
@@ -418,6 +445,11 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
         row = conn.execute("SELECT * FROM jobs WHERE id = ?", (expected.id,)).fetchone()
         if row is not None and job_from(row) == expected:
             allowed.add(expected.id)
+    for rejected in batch.hydration_quarantine_expected:
+        row = conn.execute("SELECT * FROM quarantine WHERE id = ?", (rejected.id,)).fetchone()
+        listed_job = conn.execute("SELECT 1 FROM jobs WHERE id = ?", (rejected.id,)).fetchone()
+        if row is not None and listed_job is None and quarantined_from(row) == rejected:
+            allowed.add(rejected.id)
     return replace(
         batch,
         jobs=tuple(job for job in batch.jobs if job.id in allowed),
@@ -462,7 +494,7 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
-            batch = _guard_hydration(conn, batch)
+            batch = _hold_feed_rejections(conn, _guard_hydration(conn, batch))
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             cutoff = to_text(started - timedelta(days=OPEN_RETENTION_DAYS))
             known = _first_seen(seen, started)
