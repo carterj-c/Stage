@@ -594,6 +594,9 @@ def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatc
         batch,
         jobs=tuple(job for job in batch.jobs if job.id in allowed - blocked_hydration),
         quarantined=tuple(entry for entry in batch.quarantined if entry.id in allowed),
+        rejection_screened=tuple(
+            entry for entry in batch.rejection_screened if entry.id in allowed
+        ),
         detail_fetches=tuple(
             replace(entry, resolved=False, failed=True)
             if entry.id.removeprefix(FEED_DETAIL_PREFIX) in blocked_hydration
