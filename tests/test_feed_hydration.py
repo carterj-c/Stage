@@ -3355,3 +3355,405 @@ async def test_hanzili_shared_generic_careers_url_does_not_transfer_hold(
         assert len(entries) == 1 and entries[0].rejection_evidence == "PhD required."
         jobs = await repo.list_jobs(JobFilters(source="hanzili", limit=None))
         assert len(jobs) == 1 and jobs[0].title_raw == "Software Developer Intern"
+
+
+@respx.mock
+async def test_pending_hydration_cannot_promote_after_matching_hold_arrives_during_fetch(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    respx.get(feed.plan(NOW)[0]).respond(200, text=ambiguous_hanzili_markdown())
+    evidence = "Applicants must be enrolled in a PhD program."
+
+    def hold_during_fetch(request: httpx.Request) -> httpx.Response:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO quarantine (id, source, company, title_raw, apply_url_raw, reason, "
+                "matched_phrase, first_seen, last_seen, verified_description, rejection_evidence) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "hanzili:concurrent",
+                    "hanzili",
+                    "Acme",
+                    "Systems Engineer Intern",
+                    "https://job-boards.greenhouse.io/acme/jobs/123?utm_source=other",
+                    "out-of-scope-degree",
+                    "PhD",
+                    NOW.isoformat(),
+                    NOW.isoformat(),
+                    evidence,
+                    evidence,
+                ),
+            )
+        return httpx.Response(
+            200, json=payload(body="Develop backend software engineering systems.")
+        )
+
+    detail = respx.get(GH + "123").mock(side_effect=hold_during_fetch)
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=clock_at(NOW),
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(entries) == 2
+        prior = next(entry for entry in entries if entry.id == "hanzili:concurrent")
+        pending = next(entry for entry in entries if entry.id != prior.id)
+        assert prior.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+        assert prior.rejection_evidence == evidence
+        assert pending.reason is RejectionReason.UNKNOWN_CS_ROLE
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute(
+                "SELECT resolved, failed FROM detail_fetches WHERE id = ?",
+                (FEED_DETAIL_PREFIX + pending.id,),
+            ).fetchone() == (0, 1)
+    assert detail.call_count == 1
+
+
+@respx.mock
+async def test_pending_hydration_same_batch_rejection_blocks_matching_promotion(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    page = (
+        "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| Systems Engineer Intern | Acme | Hybrid position | Company | Intern | Toronto, ON | "
+        "[Apply](https://boards.greenhouse.io/acme/jobs/123?utm_source=one) |\n"
+        "| Systems Engineer Intern | Acme | Hybrid position | Company | Intern | New York, NY | "
+        "[Apply](https://boards.greenhouse.io/acme/jobs/123?utm_source=two) |\n"
+    )
+    respx.get(feed.plan(NOW)[0]).respond(200, text=page)
+    detail = respx.get(GH + "123").mock(
+        side_effect=[
+            httpx.Response(200, json=payload(body="Develop backend software engineering systems.")),
+            httpx.Response(200, json=payload(body="Applicants must be enrolled in a PhD program.")),
+        ]
+    )
+    async with open_repository(db_path) as repo:
+        _ = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=clock_at(NOW),
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(entries) == 2
+        held = next(
+            entry for entry in entries if entry.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+        )
+        pending = next(entry for entry in entries if entry.id != held.id)
+        assert "PhD" in held.rejection_evidence
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute(
+                "SELECT resolved, failed FROM detail_fetches WHERE id = ?",
+                (FEED_DETAIL_PREFIX + pending.id,),
+            ).fetchone() == (0, 1)
+    assert detail.call_count == 2
+
+
+@pytest.mark.parametrize("same_batch", [False, True])
+async def test_pending_identity_guard_does_not_link_generic_careers_urls(
+    db_path: Path, same_batch: bool
+) -> None:
+    from stage.domain import CompanyVisit, DetailFetch, RejectionReason
+    from stage.domain.visits import FEED_PENDING_PREFIX
+    from stage.storage.copies import as_job
+
+    pending = QuarantinedJob(
+        id="hanzili:pending",
+        source="hanzili",
+        company="Acme",
+        title_raw="Systems Engineer Intern",
+        reason=RejectionReason.UNKNOWN_CS_ROLE,
+        matched_phrase="systems engineer, waiting for its job page",
+        first_seen=NOW,
+        last_seen=NOW,
+        apply_url_raw="https://employer.example/careers",
+        feed_summary="Hybrid position",
+    )
+    held = replace(
+        pending,
+        id="hanzili:other",
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase="PhD",
+        rejection_evidence="PhD required.",
+    )
+    candidate = replace(as_job(pending), description="Develop backend software systems.")
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                quarantined=(pending,) if same_batch else (pending, held),
+                detail_fetches=(DetailFetch(FEED_PENDING_PREFIX + pending.id, resolved=True),),
+                visits=(CompanyVisit(board="hanzili", succeeded=True),),
+            )
+        )
+        if same_batch:
+            await repo.apply_source_batch(
+                SourceBatch(
+                    source="hanzili",
+                    run_started_at=NOW,
+                    jobs=(replace(as_job(held), description=""),),
+                )
+            )
+            other = await repo.get_job(held.id)
+            assert other is not None
+        else:
+            other = None
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                jobs=(candidate,),
+                quarantined=(held,) if same_batch else (),
+                hydration_expected=(other,) if other is not None else (),
+                pending_expected=(pending,),
+                rejection_screened=(candidate,),
+                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + pending.id, resolved=True),)
+                + (
+                    (DetailFetch(FEED_DETAIL_PREFIX + held.id, resolved=True),)
+                    if same_batch
+                    else ()
+                ),
+            )
+        )
+        assert await repo.get_job(pending.id) is not None
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(entries) == 1 and entries[0].id == held.id
+
+
+@pytest.mark.parametrize("marker", ["evidence", "verified", "failed"])
+async def test_pending_identity_guard_distinguishes_verified_hold_from_failed_marker(
+    db_path: Path, marker: str
+) -> None:
+    from stage.domain import CompanyVisit, DetailFetch, RejectionReason
+    from stage.domain.visits import FEED_PENDING_PREFIX
+    from stage.storage.copies import as_job
+
+    pending = QuarantinedJob(
+        id="hanzili:pending",
+        source="hanzili",
+        company="Acme",
+        title_raw="Systems Engineer Intern",
+        reason=RejectionReason.UNKNOWN_CS_ROLE,
+        matched_phrase="systems engineer, waiting for its job page",
+        first_seen=NOW,
+        last_seen=NOW,
+        apply_url_raw="https://boards.greenhouse.io/acme/jobs/123?utm_source=one",
+        feed_summary="Hybrid position",
+    )
+    other = replace(
+        pending,
+        id="hanzili:other",
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase="PhD",
+        apply_url_raw="https://job-boards.greenhouse.io/acme/jobs/123",
+        rejection_evidence="PhD required." if marker == "evidence" else "",
+    )
+    original = replace(as_job(pending), description="Develop backend software systems.")
+    mark = (
+        DetailFetch(FEED_REJECTION_PREFIX + other.id, resolved=True)
+        if marker == "verified"
+        else DetailFetch(FEED_DETAIL_PREFIX + other.id, failed=True)
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                quarantined=(pending, other),
+                detail_fetches=(DetailFetch(FEED_PENDING_PREFIX + pending.id, resolved=True), mark),
+                visits=(CompanyVisit(board="hanzili", succeeded=True),),
+            )
+        )
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                jobs=(original,),
+                hydration_expected=(),
+                pending_expected=(pending,),
+                rejection_screened=(original,),
+                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + pending.id, resolved=True),),
+            )
+        )
+        assert (await repo.get_job(pending.id) is not None) is (marker == "failed")
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert any(entry.id == other.id for entry in entries)
+        with sqlite3.connect(db_path) as conn:
+            result = conn.execute(
+                "SELECT resolved, failed FROM detail_fetches WHERE id = ?",
+                (FEED_DETAIL_PREFIX + pending.id,),
+            ).fetchone()
+        assert result == ((1, 0) if marker == "failed" else (0, 1))
+
+
+async def test_later_hydration_rejection_retracts_already_promoted_matching_pending(
+    db_path: Path,
+) -> None:
+    from stage.domain import CompanyVisit, DetailFetch, RejectionReason
+    from stage.domain.visits import FEED_PENDING_PREFIX
+    from stage.storage.copies import as_job
+
+    pending = QuarantinedJob(
+        id="hanzili:first",
+        source="hanzili",
+        company="Acme",
+        title_raw="Systems Engineer Intern",
+        reason=RejectionReason.UNKNOWN_CS_ROLE,
+        matched_phrase="systems engineer, waiting for its job page",
+        first_seen=NOW,
+        last_seen=NOW,
+        apply_url_raw="https://boards.greenhouse.io/acme/jobs/123?utm_source=one",
+        feed_summary="Hybrid position",
+    )
+    sibling = replace(
+        pending,
+        id="hanzili:second",
+        apply_url_raw="https://job-boards.greenhouse.io/acme/jobs/123?utm_source=two",
+    )
+    accepted = replace(as_job(pending), description="Develop backend software systems.")
+    phd_text = "Applicants must be enrolled in a PhD program."
+    rejected_input = replace(as_job(sibling), description=phd_text)
+    rejected = replace(
+        sibling,
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase="PhD",
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                quarantined=(pending, sibling),
+                detail_fetches=tuple(
+                    DetailFetch(FEED_PENDING_PREFIX + entry.id, resolved=True)
+                    for entry in (pending, sibling)
+                ),
+                visits=(CompanyVisit(board="hanzili", succeeded=True),),
+            )
+        )
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                jobs=(accepted,),
+                hydration_expected=(),
+                pending_expected=(pending,),
+                rejection_screened=(accepted,),
+                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + pending.id, resolved=True),),
+            )
+        )
+        assert await repo.get_job(pending.id) is not None
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                quarantined=(rejected,),
+                hydration_expected=(),
+                pending_expected=(sibling,),
+                rejection_screened=(rejected_input,),
+                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + sibling.id, resolved=True),),
+            )
+        )
+        assert await repo.get_job(pending.id) is None
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(entries) == 2
+        previous = next(entry for entry in entries if entry.id == pending.id)
+        assert previous.rejection_evidence == phd_text
+        assert previous.verified_description == accepted.description
+        assert previous.feed_summary == pending.feed_summary
+        assert previous.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+        other = next(entry for entry in entries if entry.id == sibling.id)
+        assert other.rejection_evidence == phd_text
+
+
+async def test_same_batch_rejections_keep_each_postings_own_evidence(db_path: Path) -> None:
+    from stage.domain import DetailFetch, RejectionReason
+    from stage.domain.visits import FEED_DECISION_PREFIX
+    from stage.storage.copies import as_job
+
+    first = QuarantinedJob(
+        id="hanzili:first",
+        source="hanzili",
+        company="Acme",
+        title_raw="Systems Engineer Intern",
+        reason=RejectionReason.UNKNOWN_CS_ROLE,
+        matched_phrase="systems engineer, waiting for its job page",
+        first_seen=NOW,
+        last_seen=NOW,
+        apply_url_raw="https://boards.greenhouse.io/acme/jobs/123?utm_source=one",
+        feed_summary="Hybrid position",
+    )
+    second = replace(
+        first,
+        id="hanzili:second",
+        apply_url_raw=("https://job-boards.greenhouse.io/acme/jobs/123?utm_source=two"),
+    )
+    bodies = ("PhD required in systems.", "PhD required in computing.")
+    candidates = tuple(
+        replace(as_job(entry), description=body)
+        for entry, body in zip((first, second), bodies, strict=True)
+    )
+    rejected = tuple(
+        replace(entry, reason=RejectionReason.OUT_OF_SCOPE_DEGREE, matched_phrase="PhD")
+        for entry in (first, second)
+    )
+    active = tuple(
+        replace(as_job(entry), description="Previously accepted full software detail.")
+        for entry in (first, second)
+    )
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                jobs=active,
+                detail_fetches=tuple(
+                    DetailFetch(prefix + entry.id, resolved=True)
+                    for entry in active
+                    for prefix in (FEED_DETAIL_PREFIX, FEED_DECISION_PREFIX)
+                ),
+            )
+        )
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="hanzili",
+                run_started_at=NOW,
+                quarantined=rejected,
+                hydration_expected=active,
+                rejection_screened=candidates,
+                detail_fetches=tuple(
+                    DetailFetch(FEED_DETAIL_PREFIX + entry.id, resolved=True)
+                    for entry in (first, second)
+                ),
+            )
+        )
+        entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert {entry.id: entry.rejection_evidence for entry in entries} == dict(
+            zip((first.id, second.id), bodies, strict=True)
+        )
