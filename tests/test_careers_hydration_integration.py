@@ -1,5 +1,3 @@
-"""Shared-database regressions for the careers and hydration integration."""
-
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -74,7 +72,6 @@ async def test_finance_senior_hydration_preserves_roles_scope_cursor_and_auth(
         assert stored is not None and stored.work_auth_flag is None
         assert stored.roles == (RoleCategory.FINANCE, RoleCategory.INVESTMENT_BANKING)
         assert stored.level is JobLevel.SENIOR
-        # Bodies decide authorization; both restricted and unrestricted states must survive.
         for job, body, auth in (
             (jobs[0], "Manage investments. Must be a US citizen.", True),
             (jobs[1], "Manage investments and advise clients.", False),

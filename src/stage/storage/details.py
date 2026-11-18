@@ -90,25 +90,25 @@ class DetailFetches(Store):
             return []
         scope = "" if boards is None else f"WHERE stage_board_of(id, ?) IN {EACH} "
         params = () if boards is None else (source, listed(boards))
-        cursor = self._conn.execute(
-            "SELECT cursor FROM detail_queue_cursors WHERE source = ?", (source,)
-        ).fetchone()
-        if cursor is None:
-            order = "rank, first_seen DESC, id"
-            rotation: tuple[object, ...] = ()
-        else:
-            ident = str(cursor[0])
-            previous = self._conn.execute(
-                "SELECT 0 FROM quarantine WHERE id = ? UNION ALL "
-                "SELECT 1 FROM jobs WHERE id = ? ORDER BY 1 LIMIT 1",
-                (ident, ident),
-            ).fetchone()
-            rank = int(previous[0]) if previous is not None else 1
-            order = "CASE WHEN rank > ? OR (rank = ? AND id > ?) THEN 0 ELSE 1 END, rank, id"
-            rotation = (rank, rank, ident)
         rows = self._conn.execute(
-            f"SELECT id FROM ({_QUEUE}) {scope}ORDER BY {order} LIMIT ?",
-            (*_queued(source), *params, *rotation, limit),
+            f"WITH candidates AS (SELECT id, rank, first_seen, stage_board_of(id, ?) AS board "
+            f"FROM ({_QUEUE}) {scope}), "
+            "positions AS (SELECT candidates.*, b.cursor AS board_cursor, "
+            "s.cursor AS source_cursor, "
+            "CASE WHEN EXISTS (SELECT 1 FROM quarantine WHERE id = b.cursor) "
+            "THEN 0 ELSE 1 END AS cursor_rank "
+            "FROM candidates LEFT JOIN detail_queue_cursors b ON b.source = candidates.board "
+            "LEFT JOIN detail_queue_cursors s ON s.source = ?), "
+            "ranked AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY board ORDER BY "
+            "CASE WHEN board_cursor IS NULL OR rank > cursor_rank "
+            "OR (rank = cursor_rank AND id > board_cursor) THEN 0 ELSE 1 END, rank, "
+            "CASE WHEN board_cursor IS NULL THEN first_seen ELSE '' END DESC, id) AS position "
+            "FROM positions) "
+            "SELECT id FROM ranked ORDER BY position, "
+            "CASE WHEN source_cursor IS NULL THEN rank ELSE 0 END, "
+            "CASE WHEN source_cursor IS NULL OR board > stage_board_of(source_cursor, ?) "
+            "THEN 0 ELSE 1 END, board LIMIT ?",
+            (source, *_queued(source), *params, source, source, limit),
         )
         return [str(row["id"]) for row in rows]
 

@@ -442,13 +442,19 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
+            selected = batch.detail_queue_selected or (
+                (batch.detail_queue_cursor,) if batch.detail_queue_cursor is not None else ()
+            )
+            cursors = {board_of(ident, batch.source): ident for ident in selected}
+            last = batch.detail_queue_cursor or (selected[-1] if selected else None)
+            if last is not None:
+                cursors[batch.source] = last
+            conn.executemany(
+                "INSERT INTO detail_queue_cursors (source, cursor) VALUES (?, ?) "
+                "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor",
+                cursors.items(),
+            )
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
-            if batch.detail_queue_cursor is not None:
-                conn.execute(
-                    "INSERT INTO detail_queue_cursors (source, cursor) VALUES (?, ?) "
-                    "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor",
-                    (batch.source, batch.detail_queue_cursor),
-                )
             without_description = [
                 job
                 for job in batch.jobs

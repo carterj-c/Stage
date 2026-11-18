@@ -68,6 +68,7 @@ class SourceBatch:
     resolve_duplicates: Resolver | None = None
 
     detail_queue_cursor: str | None = None
+    detail_queue_selected: tuple[str, ...] = field(default_factory=tuple)
     closes_whole_source: bool = False
     list_sources: frozenset[str] = frozenset()
 

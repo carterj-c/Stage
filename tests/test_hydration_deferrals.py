@@ -247,3 +247,115 @@ def test_job_writes_preserve_migrated_authorization_state(db_path: Path) -> None
         assert row[0] == 1
     finally:
         repo.close()
+
+
+@respx.mock
+async def test_alternating_scheduled_boards_each_reach_present_jobs_with_one_slot(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    monkeypatch.setattr(SmartRecruitersAdapter, "detail_budget", 1)
+    monkeypatch.setattr(sync_module, "get_feeds", dict)
+    posture = RatePosture(concurrency=1, min_interval_s=0, max_requests_per_run=100)
+    monkeypatch.setattr(sync_module, "resolve", lambda *_, **__: posture)
+    companies = {
+        board: Company(name=f"Company {board}", slug=board, platform=Platform.SMARTRECRUITERS)
+        for board in ("a", "b")
+    }
+    details = {}
+    jobs = []
+    for board, company in companies.items():
+        listing = f"https://api.smartrecruiters.com/v1/companies/{board}/postings"
+        respx.get(listing).respond(
+            200,
+            json={
+                "totalFound": 2,
+                "content": [
+                    {
+                        "id": "p2",
+                        "name": "Summer 2027 Software Engineer Intern",
+                        "location": {"city": "Montreal"},
+                    },
+                    {"id": "broken"},
+                ],
+            },
+        )
+        details[board] = respx.get(f"{listing}/p2").respond(
+            200, json={"jobAd": {"sections": {"body": {"text": f"Full {board} description"}}}}
+        )
+        jobs.extend(
+            [
+                replace(
+                    _job("smartrecruiters", board, "p1", NOW + timedelta(minutes=1)),
+                    company=company.name,
+                ),
+                replace(_job("smartrecruiters", board, "p2"), company=company.name),
+            ]
+        )
+    async with open_repository(db_path) as repository:
+        await repository.apply_source_batch(
+            SourceBatch(
+                source="smartrecruiters",
+                run_started_at=NOW,
+                jobs=tuple(jobs),
+            )
+        )
+    for index, board in enumerate(("a", "b", "a", "b")):
+        async with open_repository(db_path) as repository:
+            before = sum(route.call_count for route in details.values())
+            when = NOW + timedelta(days=index + 1)
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repository,
+                    [companies[board]],
+                    sources=["smartrecruiters"],
+                    force_refresh=True,
+                    close_orphans=False,
+                    now_fn=_at(when),
+                    still_open=False,
+                )
+            ]
+            assert sum(route.call_count for route in details.values()) - before <= 1
+    assert details["a"].call_count == details["b"].call_count == 1
+    async with open_repository(db_path) as repository:
+        stored = {job.id: job for job in await repository.list_jobs(JobFilters(status=None))}
+        for board in ("a", "b"):
+            assert stored[f"smartrecruiters:{board}:p2"].description == f"Full {board} description"
+            assert f"smartrecruiters:{board}:p1" in await repository.detail_queue(
+                "smartrecruiters", 1, [f"smartrecruiters:{board}"]
+            )
+
+
+@pytest.mark.parametrize("limit", [1, 4])
+async def test_simultaneous_boards_share_budget_and_save_every_board_cursor(
+    db_path: Path, limit: int
+) -> None:
+    source = "smartrecruiters"
+    boards = [f"{source}:{board}" for board in ("a", "b", "c")]
+    jobs = tuple(
+        _job(source, board, posting) for board in ("a", "b", "c") for posting in ("p1", "p2")
+    )
+    async with open_repository(db_path) as repository:
+        await repository.apply_source_batch(
+            SourceBatch(source=source, run_started_at=NOW, jobs=jobs)
+        )
+        selected: list[str] = []
+        for _ in range((6 + limit - 1) // limit):
+            picked = await repository.detail_queue(source, limit, boards)
+            assert len(picked) == limit
+            selected.extend(picked)
+            await repository.apply_source_batch(
+                SourceBatch(
+                    source=source,
+                    run_started_at=NOW,
+                    detail_queue_selected=tuple(picked),
+                )
+            )
+        assert len(set(selected[:6])) == 6
+        assert selected[:3] == [f"{source}:{board}:p1" for board in ("a", "b", "c")]
+        assert selected[3:6] == [f"{source}:{board}:p2" for board in ("a", "b", "c")]
+    async with open_repository(db_path) as repository:
+        next_queue = await repository.detail_queue(source, 1, [boards[2]])
+        assert next_queue == [f"{source}:c:p1"]
