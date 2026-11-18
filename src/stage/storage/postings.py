@@ -114,7 +114,8 @@ def _clauses(filters: JobFilters) -> tuple[list[str], list[Any]]:
             places = [*places, *companies, *nowhere]
         where(placed, places)
     if filters.industries:
-        from stage.domain.industry import Industry, employer_industries
+        from stage.domain.industry import Industry
+        from stage.storage.industry import employer_industries
 
         catalogue = employer_industries()
         matching = [name for name, labels in catalogue.items() if labels & filters.industries]

@@ -14,12 +14,13 @@ from typer.testing import CliRunner
 from stage.ai.server import build_server
 from stage.cli.app import app
 from stage.domain import Job, JobFilters, JobLevel, RoleCategory
-from stage.domain.industry import Industry, employer_industries, validate_catalogue
+from stage.domain.industry import Industry
 from stage.domain.preferences import Preferences
 from stage.http import HttpClient, profile
 from stage.services.preferences import load_preferences, revise_preferences, save_preferences
 from stage.services.screening import normalize_batch
 from stage.sources.simplify import SimplifyFeed
+from stage.storage.industry import employer_industries, validate_catalogue
 from stage.storage.repository import SourceBatch
 from stage.storage.sql import fold_company
 from stage.storage.sqlite_repo import SqliteRepository
@@ -247,7 +248,7 @@ def test_multiple_labels_for_one_employer(stored: Path, monkeypatch: pytest.Monk
         **employer_industries(),
         "riot games": frozenset({Industry.GAMING, Industry.FINTECH}),
     }
-    monkeypatch.setattr("stage.domain.industry.employer_industries", lambda: catalogue)
+    monkeypatch.setattr("stage.storage.industry.employer_industries", lambda: catalogue)
     with closing(SqliteRepository.connect(stored)) as repo:
         assert repo.count_jobs(JobFilters(industries=frozenset({Industry.FINTECH}))) == 3
         assert (
