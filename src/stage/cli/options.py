@@ -265,7 +265,8 @@ RoleOption = Annotated[
         metavar="ROLE",
         help=(
             "Filter by role: swe, security, data, ml-ai, quant, infra, embedded, "
-            "general-cs, unknown"
+            "general-cs, project-management, program-management, production, finance, "
+            "investment-research, investment-banking, risk, unknown"
         ),
     ),
 ]
