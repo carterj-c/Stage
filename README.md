@@ -479,11 +479,11 @@ and Workday's early-career queries still constrain what is fetched.
 Upgrades rescreen stored postings in bounded pages. Quarantined postings lack their
 original descriptions, so they are not released by rescreen alone. Fresh listings
 without descriptions can release quant and the supported management and finance
-occupations, where graduate degrees are eligible. Rescreen can also restore these
-occupations using title evidence unless they were explicitly rejected for degree
-requirements. Their degree and work authorization are reported as unknown until
-evidence is available. Other descriptionless roles remain quarantined until a
-fresh description is available.
+occupations, where graduate degrees are eligible. Rescreen can sharpen rejection
+reasons but does not establish whether a posting remains open, so it never releases
+quarantined postings without a fresh source listing. Degree and work authorization
+are reported as unknown until evidence is available. Other descriptionless roles
+remain quarantined until a fresh description is available.
 
 Workday and SmartRecruiters queue eligible quarantined postings for job pages,
 including location rejections. The bounded queue advances across syncs even when

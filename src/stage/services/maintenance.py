@@ -167,6 +167,7 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
                         run_started_at=moment,
                         jobs=tuple(entry for entry in updates if entry.source == source),
                         quarantined=tuple(entry for entry in rejected if entry.source == source),
+                        recover_copies=False,
                     )
                 )
                 if applied.successors:
@@ -176,7 +177,7 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
         if not changed_this_pass:
             complete = True
             break
-    released, relabelled = await _reclassify_quarantine(repository, moment)
+    relabelled = await _reclassify_quarantine(repository)
     relocated = await repository.refresh_quarantine_locations(_place_resolver())
     relinked = await repository.relink_duplicates(resolve_duplicates, canonical_apply_url)
     waiting = await repository.count_quarantined(QuarantineFilters())
@@ -187,7 +188,6 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
         quarantined=quarantined,
         total=total,
         updated=updated,
-        released=released,
         relabelled=relabelled,
         relocated=relocated,
         relinked=relinked,
@@ -196,12 +196,11 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
     )
 
 
-async def _reclassify_quarantine(repository: AsyncRepository, moment: datetime) -> tuple[int, int]:
+async def _reclassify_quarantine(repository: AsyncRepository) -> int:
     from stage.domain import RejectionReason, SourceSignals
-    from stage.lexicon import fold, occupation_lexicon
+    from stage.lexicon import fold
     from stage.services.screening import normalize_batch
 
-    released = 0
     relabelled = 0
     after_id = ""
     while entries := await repository.list_rescreen_quarantine(after_id, RESCREEN_LIMIT):
@@ -227,7 +226,7 @@ async def _reclassify_quarantine(repository: AsyncRepository, moment: datetime) 
             for entry in entries
             if entry.reason is not RejectionReason.OUT_OF_SCOPE_DEGREE
         )
-        kept, rejected = normalize_batch(candidates)
+        _, rejected = normalize_batch(candidates)
         previous = {entry.id: entry for entry in entries}
         relabelled += await repository.relabel_quarantine(
             tuple(
@@ -237,25 +236,7 @@ async def _reclassify_quarantine(repository: AsyncRepository, moment: datetime) 
                 != (previous[entry.id].reason, previous[entry.id].matched_phrase)
             )
         )
-        safe = tuple(
-            job
-            for job in kept
-            if any(
-                role is RoleCategory.QUANT or role.value in occupation_lexicon()
-                for role in (job.role, *job.roles)
-            )
-        )
-        for source in sorted({job.source for job in safe}):
-            applied = await repository.apply_source_batch(
-                SourceBatch(
-                    source=source,
-                    run_started_at=moment,
-                    jobs=tuple(job for job in safe if job.source == source),
-                    resolve_duplicates=resolve_duplicates,
-                )
-            )
-            released += applied.added
-    return released, relabelled
+    return relabelled
 
 
 def _current_term(job: Job) -> str:

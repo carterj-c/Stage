@@ -1848,12 +1848,8 @@ async def test_quarantine_is_refetched_from_workday_before_release(
             )
         )
         result = await rescreen(repo, now=NOW)
-        if old_reason == "out-of-scope-degree":
-            assert result.quarantine_waiting == 1 and result.released == 0
-        else:
-            assert result.quarantine_waiting == 0 and result.released == 1
-            unknown = await repo.get_job(ident)
-            assert unknown is not None and unknown.work_auth_flag is None
+        assert result.quarantine_waiting == 1 and result.released == 0
+        assert await repo.get_job(ident) is None
         queue = await repo.detail_queue("workday", 50)
         assert ident in queue
         async with _client(UNPACED) as client:

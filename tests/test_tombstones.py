@@ -671,7 +671,9 @@ async def test_a_list_copy_of_a_recently_purged_posting_still_arrives(db_path: P
     assert stored is not None, "only the 14-day window retires a posting for good"
 
 
-async def test_safe_rescreen_release_keeps_original_tombstone_first_seen(db_path: Path) -> None:
+async def test_fresh_source_release_after_rescreen_keeps_tombstone_first_seen(
+    db_path: Path,
+) -> None:
     from stage.services.maintenance import rescreen
 
     original = NOW - timedelta(days=20)
@@ -697,7 +699,16 @@ async def test_safe_rescreen_release_keeps_original_tombstone_first_seen(db_path
             )
         )
         result = await rescreen(repository, now=NOW)
-        assert result.released == 1
+        assert result.released == 0 and result.quarantine_waiting == 1
+        assert await repository.get_job("row") is None
+        from stage.services.screening import normalize_batch
+
+        fresh = job("row", seen=NOW, title=title)
+        kept, rejected = normalize_batch([fresh])
+        assert len(kept) == 1 and not rejected
+        await repository.apply_source_batch(
+            SourceBatch(source="greenhouse", run_started_at=NOW, jobs=kept)
+        )
         restored = await repository.get_job("row")
         assert restored is not None and restored.first_seen == original
         assert restored.work_auth_flag is None

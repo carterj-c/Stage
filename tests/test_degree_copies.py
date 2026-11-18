@@ -265,3 +265,31 @@ def test_restored_descriptionless_copy_keeps_unknown_authorization_after_promoti
     assert promoted is not None and promoted.duplicate_of is None
     assert promoted.work_auth_flag is None
     repository.close()
+
+
+async def test_rescreen_does_not_restore_quarantined_copy_without_source_read(
+    db_path: Path,
+) -> None:
+    from stage.classify.scope import Rejection, to_quarantined
+    from stage.services.maintenance import rescreen
+    from stage.storage import open_repository
+
+    main = _board(OPEN_TO_ALL)
+    follower = to_quarantined(
+        _copy(),
+        Rejection(
+            RejectionReason.OUT_OF_SCOPE_DEGREE,
+            f"copy of {main.id} rejected for pursuing masters or phd",
+        ),
+    )
+    async with open_repository(db_path) as repository:
+        await repository.apply_source_batch(
+            SourceBatch(source="greenhouse", run_started_at=NOW, jobs=(main,))
+        )
+        await repository.apply_source_batch(
+            SourceBatch(source="simplify", run_started_at=NOW, quarantined=(follower,))
+        )
+        result = await rescreen(repository, now=NOW)
+        assert result.updated >= 1
+        assert result.released == 0 and result.quarantine_waiting == 1
+        assert await repository.get_job(COPY) is None

@@ -67,7 +67,7 @@ async def test_a_rejection_the_lexicon_still_cannot_explain_is_left_alone(db_pat
         assert (await _reasons(repository))["b"][0] == RejectionReason.UNKNOWN_CS_ROLE.value
 
 
-async def test_a_posting_that_now_passes_is_restored_rather_than_relabelled(
+async def test_a_posting_that_now_passes_waits_for_a_fresh_listing(
     db_path: Path,
 ) -> None:
     passing = _entry(
@@ -80,14 +80,28 @@ async def test_a_posting_that_now_passes_is_restored_rather_than_relabelled(
         await _store(repository, [passing])
         result = await rescreen(repository, now=NOW)
 
-        assert result.released == 1, "a posting that now passes belongs back in the database"
-        assert result.relabelled == 0, "a released posting must not also be relabelled"
-        assert "c" not in await _reasons(repository), "quarantine is a move, not a copy"
+        assert result.released == 0 and result.quarantine_waiting == 1
+        assert result.relabelled == 0
+        assert await repository.get_job("c") is None
+        assert "c" in await _reasons(repository)
+
+        from dataclasses import replace
+
+        from stage.services.screening import normalize_batch
+        from stage.storage.copies import as_job
+
+        fresh = replace(as_job(passing), last_seen=NOW)
+        kept, rejected = normalize_batch([fresh])
+        assert len(kept) == 1 and not rejected
+        await repository.apply_source_batch(
+            SourceBatch(source="greenhouse", run_started_at=NOW, jobs=kept)
+        )
         restored = await repository.get_job("c")
         assert restored is not None
         assert restored.work_auth_flag is None
         assert restored.degree_requirement.value == "unknown"
         assert restored.first_seen == passing.first_seen
+        assert "c" not in await _reasons(repository)
 
 
 async def test_legacy_cs_intern_waits_for_degree_evidence_before_release(db_path: Path) -> None:
@@ -134,7 +148,7 @@ async def test_rescreen_preserves_explicit_degree_rejection_and_evidence(db_path
         assert (await _reasons(repository))[entry.id] == ("out-of-scope-degree", "PhD required")
 
 
-async def test_quarantine_rescreen_pages_relabel_and_release_without_skipping(
+async def test_quarantine_rescreen_pages_relabel_without_skipping(
     db_path: Path,
     monkeypatch: object,
 ) -> None:
@@ -152,10 +166,85 @@ async def test_quarantine_rescreen_pages_relabel_and_release_without_skipping(
     async with open_repository(db_path) as repository:
         await _store(repository, entries)
         result = await rescreen(repository, now=NOW)
-        assert result.released == 1 and result.relabelled == 1
-        assert result.quarantine_waiting == 3 and not result.recovery_complete
-        restored = await repository.get_job("c")
-        assert restored is not None and restored.work_auth_flag is None
+        assert result.released == 0 and result.relabelled == 1
+        assert result.quarantine_waiting == 4 and not result.recovery_complete
+        assert await repository.get_job("c") is None
         reasons = await _reasons(repository)
         assert reasons["a"] == ("not-a-cs-role", "marketeer")
         assert reasons["d"] == ("out-of-scope-degree", "PhD required")
+
+
+async def test_removed_or_unavailable_postings_need_a_current_listing(db_path: Path) -> None:
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from stage.domain import CompanyVisit, JobStatus
+    from stage.services.screening import normalize_batch
+    from stage.storage.copies import as_job
+
+    old = NOW - timedelta(days=30)
+    stale = replace(
+        _entry(
+            "greenhouse:acme:stale",
+            "Quantitative Research Intern",
+            RejectionReason.UNKNOWN_CS_ROLE,
+            "old role",
+        ),
+        first_seen=old,
+        last_seen=NOW - timedelta(days=20),
+    )
+    recent = replace(
+        _entry(
+            "greenhouse:acme:recent",
+            "Quantitative Research Intern",
+            RejectionReason.UNKNOWN_CS_ROLE,
+            "old role",
+        ),
+        first_seen=old,
+        last_seen=NOW,
+    )
+    async with open_repository(db_path) as repository:
+        await _store(repository, [stale, recent])
+        await repository.apply_source_batch(
+            SourceBatch(
+                source="greenhouse",
+                run_started_at=NOW,
+                visits=(
+                    CompanyVisit(board="greenhouse:acme", succeeded=False, error="unavailable"),
+                ),
+            )
+        )
+        unavailable = await rescreen(repository, now=NOW)
+        assert unavailable.released == 0 and unavailable.quarantine_waiting == 2
+        assert await repository.get_job(stale.id) is None
+        assert await repository.get_job(recent.id) is None
+        await repository.apply_source_batch(
+            SourceBatch(
+                source="greenhouse",
+                run_started_at=NOW + timedelta(hours=1),
+                closable_boards=("greenhouse:acme",),
+                visits=(CompanyVisit(board="greenhouse:acme", succeeded=True),),
+            )
+        )
+        removed = await rescreen(repository, now=NOW + timedelta(hours=1))
+        assert removed.released == 0 and removed.quarantine_waiting == 2
+        assert await repository.get_job(stale.id) is None
+        assert await repository.get_job(recent.id) is None
+        observed = replace(
+            as_job(stale), first_seen=NOW + timedelta(hours=2), last_seen=NOW + timedelta(hours=2)
+        )
+        kept, rejected = normalize_batch([observed])
+        assert len(kept) == 1 and not rejected
+        await repository.apply_source_batch(
+            SourceBatch(
+                source="greenhouse",
+                run_started_at=NOW + timedelta(hours=2),
+                jobs=kept,
+            )
+        )
+        restored = await repository.get_job(stale.id)
+        assert restored is not None and restored.status is JobStatus.OPEN
+        assert restored.first_seen == old and restored.last_seen == observed.last_seen
+        assert restored.work_auth_flag is None and restored.degree_requirement.value == "unknown"
+        assert await repository.get_job(recent.id) is None
+        assert set(await _reasons(repository)) == {recent.id}
