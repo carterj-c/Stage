@@ -977,18 +977,21 @@ async def _persist_source_batch(
         await repository.feed_pending_ids(ids) if batch.source == "hanzili" and ids else set()
     )
     expected = await repository.verified_feed_jobs(ids) if ids else []
-    if batch.feed_source:
+    if batch.feed_summary_source:
         existing = {entry.id: entry for entry in feed_snapshot}
+        previous_rejections = {entry.id: entry for entry in feed_quarantine}
         verified = {entry.id: entry for entry in expected}
         prepared: list[Job] = []
         for entry in collected:
             old = existing.get(entry.id)
             full = verified.get(entry.id)
+            old_rejection = previous_rejections.get(entry.id)
             carried = _carried(entry, (old.description, old.location_raw) if old else None)
             summary = (
                 entry.description
                 or entry.feed_summary
                 or (old.feed_summary if old else "")
+                or (old_rejection.feed_summary if old_rejection else "")
                 or (old.description if old and not full else "")
             )
             prepared.append(
@@ -1521,6 +1524,7 @@ async def _run_feed_source(
             source=source,
             run_started_at=run_started_at,
             feed_source=True,
+            feed_summary_source=bool(getattr(feed, "description_is_summary", False)),
             validators=validators,
             rate_state=settled,
             resolve_duplicates=resolve_duplicates,

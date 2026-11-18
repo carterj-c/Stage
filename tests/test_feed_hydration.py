@@ -33,8 +33,16 @@ LEVER_ID = "337314ee-4de5-4b96-a419-1b9287a7df68"
 FEED_URL = "https://feed.example.test/jobs"
 
 
+def clock_at(moment: datetime) -> Callable[[], datetime]:
+    def now_at() -> datetime:
+        return moment
+
+    return now_at
+
+
 class Feed:
     name: ClassVar[str] = "test-feed"
+    description_is_summary: ClassVar[bool] = True
     rate_profile: ClassVar[str] = "feeds"
     hosts: ClassVar[frozenset[str]] = frozenset({"feed.example.test"})
     bucket_key: ClassVar[str] = ""
@@ -2464,3 +2472,264 @@ async def test_concurrent_quarantine_is_not_replaced_by_fresh_pending_hanzili(
         assert not await repo.load_validators("hanzili")
         assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "partial"
     assert route.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize("target", ["greenhouse", "unsupported"])
+async def test_hanzili_rejected_summary_survives_later_blank_feed_refresh(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    apply_url = (
+        "https://boards.greenhouse.io/acme/jobs/123"
+        if target == "greenhouse"
+        else "https://unknown.example/job"
+    )
+
+    def page(summary: str) -> str:
+        return (
+            "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            f"| Software Engineer Intern | Acme | {summary} | Company | Intern | "
+            f"Toronto, ON | [Apply]({apply_url}) |\n"
+        )
+
+    summary = "Applicants must be enrolled in a PhD program."
+    feed_route = respx.get(feed.plan(NOW)[0]).mock(
+        side_effect=[
+            httpx.Response(200, text=page(summary)),
+            httpx.Response(200, text=page("")),
+            httpx.Response(200, text=page("")),
+        ]
+    )
+    detail = respx.get(GH + "123").respond(200, json=payload())
+    async with open_repository(db_path) as repo:
+        for hours in (0, 6, 12):
+            moment = NOW + timedelta(hours=hours)
+
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [],
+                    sources=["hanzili"],
+                    now_fn=clock_at(moment),
+                    close_orphans=False,
+                    still_open=False,
+                )
+            ]
+            assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+            entries = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+            assert len(entries) == 1 and entries[0].reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+            assert entries[0].feed_summary == summary
+    assert feed_route.call_count == 3
+    assert detail.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize("target", ["muse", "greenhouse"])
+async def test_muse_full_contents_remain_full_on_ingest_and_refresh(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    from stage.domain import JobFilters
+    from stage.sources.themuse import TheMuseFeed
+
+    feed = TheMuseFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"themuse": feed})
+    apply_url = (
+        "https://www.themuse.com/jobs/123"
+        if target == "muse"
+        else "https://boards.greenhouse.io/acme/jobs/123"
+    )
+    body = {
+        "results": [
+            {
+                "id": 123,
+                "name": "Software Engineer Intern",
+                "company": {"name": "Acme"},
+                "locations": [{"name": "Toronto, Canada"}],
+                "refs": {"landing_page": apply_url},
+                "contents": "<p>Build software systems.</p><p>Must be a US citizen.</p>",
+                "categories": [{"name": "Software Engineering"}],
+            }
+        ],
+        "page_count": 1,
+    }
+    route = respx.get(url__startswith="https://www.themuse.com/api/public/jobs").respond(
+        200, json=body
+    )
+    detail = respx.get(GH + "123").respond(200, json=payload())
+    async with open_repository(db_path) as repo:
+        for hours in (0, 6):
+            moment = NOW + timedelta(hours=hours)
+
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [],
+                    sources=["themuse"],
+                    now_fn=clock_at(moment),
+                    close_orphans=False,
+                    still_open=False,
+                )
+            ]
+            rows = await repo.list_jobs(JobFilters(source="themuse", limit=None))
+            assert len(rows) == 1
+            assert rows[0].description == "Build software systems.\nMust be a US citizen."
+            assert rows[0].feed_summary == "" and rows[0].work_auth_flag
+    assert route.call_count == 2
+    assert detail.call_count == 0
+
+
+@respx.mock
+async def test_blank_hanzili_refresh_retries_if_quarantine_summary_changes_concurrently(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.services.screening import normalize_batch
+    from stage.sources.curated_markdown import HanziliFeed
+
+    feed = HanziliFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"hanzili": feed})
+    url = "https://boards.greenhouse.io/acme/jobs/123"
+
+    def page(summary: str) -> str:
+        return (
+            "| Title | Company | Role | Company Info | Details | Location | Apply |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            f"| Software Engineer Intern | Acme | {summary} | Company | Intern | "
+            f"Toronto, ON | [Apply]({url}) |\n"
+        )
+
+    first_summary = "Applicants must be enrolled in a PhD program."
+    updated_summary = "PhD required. Must be a US citizen."
+    requests: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(200, text=page(first_summary), headers={"ETag": '"v1"'})
+        if request.headers.get("if-none-match") == '"v2"':
+            return httpx.Response(304)
+        return httpx.Response(200, text=page(""), headers={"ETag": '"v2"'})
+
+    respx.get(feed.plan(NOW)[0]).mock(side_effect=answer)
+    detail = respx.get(GH + "123").respond(200, json=payload())
+    changed = False
+
+    def racing(jobs: Sequence[Job]) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+        nonlocal changed
+        result = normalize_batch(jobs)
+        if not changed:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE quarantine SET feed_summary = ? WHERE source = ?",
+                    (
+                        updated_summary,
+                        "hanzili",
+                    ),
+                )
+            changed = True
+        return result
+
+    async def run(repo: AsyncRepository, moment: datetime) -> list[object]:
+        return [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["hanzili"],
+                now_fn=lambda: moment,
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+
+    async with open_repository(db_path) as repo:
+        await run(repo, NOW)
+        monkeypatch.setattr("stage.services.screening.normalize_batch", racing)
+        events = await run(repo, NOW + timedelta(hours=6))
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "partial"
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        held = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(held) == 1 and held[0].feed_summary == updated_summary
+        assert not await repo.load_validators("hanzili")
+        events = await run(repo, NOW + timedelta(hours=6, minutes=1))
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "success"
+        assert "if-none-match" not in requests[-1].headers
+        assert not await repo.list_jobs(JobFilters(source="hanzili", limit=None))
+        held = await repo.list_quarantined(QuarantineFilters(source="hanzili"))
+        assert len(held) == 1 and held[0].reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+        assert held[0].feed_summary == updated_summary
+    assert detail.call_count == 0
+
+
+@respx.mock
+async def test_muse_fresh_full_body_replaces_older_hydrated_body(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.domain import DetailFetch, JobFilters
+    from stage.sources.themuse import MuseListing, TheMuseFeed
+
+    feed = TheMuseFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"themuse": feed})
+    raw = {
+        "id": 123,
+        "name": "Software Engineer Intern",
+        "company": {"name": "Acme"},
+        "locations": [{"name": "Toronto, Canada"}],
+        "refs": {"landing_page": "https://boards.greenhouse.io/acme/jobs/123"},
+        "contents": "<p>New Muse full posting.</p><p>Must be a US citizen.</p>",
+        "categories": [{"name": "Software Engineering"}],
+    }
+    respx.get(url__startswith="https://www.themuse.com/api/public/jobs").respond(
+        200,
+        json={"results": [raw], "page_count": 1},
+    )
+    async with open_repository(db_path) as repo:
+        source_row = feed._to_job(MuseListing.model_validate(raw), NOW)
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="themuse",
+                run_started_at=NOW,
+                jobs=(replace(source_row, description=""),),
+            )
+        )
+        snapshot = await repo.get_job(source_row.id)
+        assert snapshot is not None
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="themuse",
+                run_started_at=NOW,
+                jobs=(replace(snapshot, description="Old hydrated body."),),
+                hydration_expected=(snapshot,),
+                detail_fetches=(DetailFetch(FEED_DETAIL_PREFIX + snapshot.id, resolved=True),),
+            )
+        )
+        events = [
+            event
+            async for event in sync_module.sync(
+                repo,
+                [],
+                sources=["themuse"],
+                now_fn=lambda: NOW + timedelta(hours=6),
+                close_orphans=False,
+                still_open=False,
+            )
+        ]
+        rows = await repo.list_jobs(JobFilters(source="themuse", limit=None))
+        assert len(rows) == 1
+        assert rows[0].description == "New Muse full posting.\nMust be a US citizen."
+        assert rows[0].feed_summary == "" and rows[0].work_auth_flag
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "success"

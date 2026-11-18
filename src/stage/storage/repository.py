@@ -69,6 +69,7 @@ class SourceBatch:
 
     closes_whole_source: bool = False
     feed_source: bool = False
+    feed_summary_source: bool = False
     feed_expected: tuple[Job, ...] | None = None
     feed_quarantine_expected: tuple[QuarantinedJob, ...] = ()
     pending_expected: tuple[QuarantinedJob, ...] = ()

@@ -557,18 +557,21 @@ def _protect_screened_feed_rows(
             or original != current
             or read is None
             or not read.description
-            or read.description != current.description
+            or (batch.feed_summary_source and read.description != current.description)
             or (ident in rejected_ids and rejected_entries[ident].feed_summary != read.feed_summary)
             or (
                 ident in accepted
                 and (
                     accepted[ident].feed_summary != read.feed_summary
-                    or (batch.feed_source and accepted[ident].description != current.description)
+                    or (
+                        batch.feed_summary_source
+                        and accepted[ident].description != current.description
+                    )
                 )
             )
         ):
             blocked.add(ident)
-        elif ident in rejected_ids:
+        elif ident in rejected_ids and read.description == current.description:
             verified.append(ident)
     if blocked:
         batch = replace(
