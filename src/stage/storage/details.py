@@ -1,6 +1,6 @@
 import json
 from collections.abc import Collection, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from stage.domain import (
     UNKNOWN_TERM,
@@ -20,6 +20,7 @@ from stage.domain.liveness import (
 )
 from stage.domain.text import LOCATION_COUNT_GLOB
 from stage.storage.rows import (
+    BAMBOO_QUARANTINE_REFRESH_DAYS,
     CLOSED,
     OPEN,
     UPSERT_CHECK,
@@ -32,6 +33,7 @@ from stage.storage.upkeep import promote_open_copies, remember_heirs
 
 MAX_DETAIL_ATTEMPTS = 3
 REREAD_ATTEMPTS = 2
+BAMBOO_QUARANTINE_REFRESH = timedelta(days=BAMBOO_QUARANTINE_REFRESH_DAYS)
 
 _QUEUED = (
     "FROM jobs j LEFT JOIN detail_fetches d ON d.id = j.id "
@@ -51,7 +53,8 @@ _AWAITING = (
     "(q.source IN ('workday', 'smartrecruiters', 'bamboohr') "
     "AND q.reason IN (?, ?, ?, ?, ?, ?))) "
     "AND (d.id IS NULL OR (d.failed = 1 AND d.attempts < ?) "
-    "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)))"
+    "OR (d.fetched_at < (SELECT fetched_at FROM detail_fetches WHERE id = ?)) "
+    "OR (q.source = 'bamboohr' AND d.fetched_at <= ?))"
 )
 _QUEUE = (
     f"SELECT j.id, 1 AS rank, j.first_seen {_QUEUED} "
@@ -59,7 +62,7 @@ _QUEUE = (
 )
 
 
-def _queued(source: str) -> tuple[object, ...]:
+def _queued(source: str, now: datetime | None = None) -> tuple[object, ...]:
     return (
         source,
         OPEN,
@@ -79,6 +82,7 @@ def _queued(source: str) -> tuple[object, ...]:
         RejectionReason.OUT_OF_SCOPE_LOCATION.value,
         MAX_DETAIL_ATTEMPTS,
         "rules:changed",
+        to_text((now or datetime.now(UTC)) - BAMBOO_QUARANTINE_REFRESH),
     )
 
 
@@ -89,6 +93,7 @@ class DetailFetches(Store):
         limit: int,
         boards: Collection[str] | None = None,
         ids: Collection[str] | None = None,
+        now: datetime | None = None,
     ) -> list[str]:
         if limit <= 0 or (boards is not None and not boards) or (ids is not None and not ids):
             return []
@@ -119,7 +124,7 @@ class DetailFetches(Store):
             "CASE WHEN source_cursor IS NULL THEN rank ELSE 0 END, "
             "CASE WHEN source_cursor IS NULL OR board > stage_board_of(source_cursor, ?) "
             "THEN 0 ELSE 1 END, board LIMIT ?",
-            (source, *_queued(source), *params, source, source, limit),
+            (source, *_queued(source, now), *params, source, source, limit),
         )
         return [str(row["id"]) for row in rows]
 

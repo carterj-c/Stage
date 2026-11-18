@@ -42,6 +42,7 @@ from stage.storage.rows import (
     UPSERT_VISIT,
     job_from,
     job_params,
+    quarantined_from,
     quarantined_params,
     rate_state_params,
     stored_locations,
@@ -227,6 +228,61 @@ def _reject(
     remember_heirs(conn, sorted(heirs.items()), stamp)
     conn.execute(f"DELETE FROM jobs WHERE id IN {EACH}", (listed(leaving),))
     return entries, heirs
+
+
+def _hold_bamboo(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
+    if batch.source != "bamboohr":
+        return batch
+    ids = {job.id for job in batch.jobs} | {entry.id for entry in batch.quarantined}
+    ids.update(entry.id for entry in batch.detail_fetches)
+    rows = conn.execute(
+        f"SELECT q.*, d.fetched_at AS detail_at FROM quarantine q "
+        f"LEFT JOIN detail_fetches d ON d.id = q.id WHERE q.id IN {EACH}",
+        (listed(ids),),
+    )
+    previous = {
+        str(row["id"]): (quarantined_from(row), from_text(row["detail_at"])) for row in rows
+    }
+    resolved = {entry.id for entry in batch.detail_fetches if entry.resolved and not entry.failed}
+    empty = {job.id for job in batch.jobs if job.id in previous and not job.description.strip()}
+    held = empty | {
+        ident
+        for ident, (entry, fetched) in previous.items()
+        if ident not in resolved
+        or entry.last_seen > batch.run_started_at
+        or (fetched is not None and fetched > batch.run_started_at)
+    }
+    conn.executemany(
+        "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
+        [(to_text(job.last_seen), job.id) for job in batch.jobs if job.id in held],
+    )
+    rejected = tuple(
+        replace(
+            entry,
+            reason=previous[entry.id][0].reason,
+            matched_phrase=previous[entry.id][0].matched_phrase,
+            last_seen=max(entry.last_seen, previous[entry.id][0].last_seen),
+        )
+        if entry.id in held
+        else entry
+        for entry in batch.quarantined
+    )
+    stale = {
+        ident
+        for ident, (entry, fetched) in previous.items()
+        if entry.last_seen > batch.run_started_at
+        or (fetched is not None and fetched > batch.run_started_at)
+    }
+    return replace(
+        batch,
+        jobs=tuple(job for job in batch.jobs if job.id not in held),
+        quarantined=rejected,
+        detail_fetches=tuple(
+            entry
+            for entry in batch.detail_fetches
+            if entry.id not in stale and (entry.id not in empty or not entry.resolved)
+        ),
+    )
 
 
 def _crawl(conn: sqlite3.Connection, batch: SourceBatch, stamp: str) -> None:
@@ -442,6 +498,7 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
+            batch = _hold_bamboo(conn, batch)
             selected = (
                 batch.detail_queue_selected
                 if batch.detail_queue_selected is not None

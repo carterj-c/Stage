@@ -37,6 +37,7 @@ from stage.services.screening import normalize_batch
 from stage.sources.bamboohr import BambooHrAdapter
 from stage.sources.platforms import SlugRejectedError
 from stage.storage import SourceBatch, open_repository
+from stage.storage.details import BAMBOO_QUARANTINE_REFRESH
 from stage.storage.sqlite_repo import SqliteRepository
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -457,3 +458,171 @@ async def test_quarantined_job_requires_fresh_verified_body_before_restoration(
                 assert not quarantined
                 assert await repo.detail_queue("bamboohr", 10) == []
         assert route.call_count == 2
+
+
+@respx.mock
+async def test_quarantine_refresh_preserves_rejection_until_requirements_change(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sync_module, "get_feeds", dict)
+    monkeypatch.setattr(sync_module, "resolve", lambda *_, **__: UNPACED)
+    title = "Summer 2027 Software Engineer Intern"
+    location = {"city": "Toronto", "country": "Canada"}
+
+    def board(name: str) -> dict[str, Any]:
+        return {"result": [{"id": 884, "jobOpeningName": name, "location": location}]}
+
+    listing = respx.get(f"{BASE}/list").respond(200, json=board(title))
+    detail = respx.get(f"{BASE}/884/detail").respond(
+        200, json=_detail("A PhD is required. Build Python software.", title)
+    )
+    async with open_repository(db_path) as repo:
+
+        async def sync_at(when: datetime) -> None:
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [COMPANY],
+                    sources=["bamboohr"],
+                    force_refresh=True,
+                    now_fn=_at(when),
+                    still_open=False,
+                )
+            ]
+
+        await sync_at(NOW)
+        await sync_at(NOW + timedelta(days=1))
+        (held,) = await repo.list_quarantined(QuarantineFilters(limit=None))
+        assert held.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+        assert "phd" in held.matched_phrase.lower()
+        assert detail.call_count == 1
+        listing.respond(200, json=board("Marketing Manager"))
+        await sync_at(NOW + timedelta(days=2))
+        (after_listing,) = await repo.list_quarantined(QuarantineFilters(limit=None))
+        assert after_listing.title_raw == "Marketing Manager"
+        assert (after_listing.reason, after_listing.matched_phrase) == (
+            held.reason,
+            held.matched_phrase,
+        )
+        assert await repo.get_job(IDENT) is None
+        assert detail.call_count == 1
+        listing.respond(200, json=board(title))
+        due = NOW + timedelta(days=1) + BAMBOO_QUARANTINE_REFRESH
+        await sync_at(due - timedelta(seconds=1))
+        assert detail.call_count == 1
+        detail.respond(200, json={"result": {"jobOpening": {"description": "no identity"}}})
+        await sync_at(due)
+        assert detail.call_count == 2
+        (after_failure,) = await repo.list_quarantined(QuarantineFilters(limit=None))
+        assert (after_failure.reason, after_failure.matched_phrase) == (
+            held.reason,
+            held.matched_phrase,
+        )
+        assert await repo.get_job(IDENT) is None
+        assert await repo.detail_queue("bamboohr", 10, now=due) == [IDENT]
+        body = "Build Python software. Bachelor's degree students welcome."
+        detail.respond(200, json=_detail(body, title))
+        await sync_at(due + timedelta(hours=1))
+        saved = await repo.get_job(IDENT)
+        assert saved is not None and saved.description == body
+        assert not await repo.list_quarantined(QuarantineFilters(limit=None))
+        assert detail.call_count == 3
+    with closing(SqliteRepository.connect(db_path)) as check:
+        row = check._conn.execute(
+            "SELECT attempts, resolved, failed FROM detail_fetches WHERE id = ?", (IDENT,)
+        ).fetchone()
+        assert tuple(row) == (2, 1, 0)
+
+
+@respx.mock
+async def test_failed_refresh_attempts_are_bounded_then_rearmed_by_interval(db_path: Path) -> None:
+    job = BambooHrAdapter().result(COMPANY, BOARD, NOW).jobs[0]
+    held = to_quarantined(job, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "PhD required"))
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="bamboohr",
+                run_started_at=NOW,
+                quarantined=(held,),
+                detail_fetches=(DetailFetch(id=IDENT, resolved=True),),
+            )
+        )
+        due = NOW + BAMBOO_QUARANTINE_REFRESH
+        assert await repo.detail_queue("bamboohr", 10, now=due - timedelta(seconds=1)) == []
+        for attempt in range(3):
+            when = due + timedelta(hours=attempt)
+            assert await repo.detail_queue("bamboohr", 10, now=when) == [IDENT]
+            await repo.apply_source_batch(
+                SourceBatch(
+                    source="bamboohr",
+                    run_started_at=when,
+                    detail_fetches=(DetailFetch(id=IDENT, failed=True),),
+                )
+            )
+        last = due + timedelta(hours=2)
+        assert await repo.detail_queue("bamboohr", 10, now=last + timedelta(days=6)) == []
+        assert await repo.detail_queue("bamboohr", 10, now=last + BAMBOO_QUARANTINE_REFRESH) == [
+            IDENT
+        ]
+        with closing(SqliteRepository.connect(db_path)) as check:
+            row = check._conn.execute(
+                "SELECT attempts, resolved, failed FROM detail_fetches WHERE id = ?", (IDENT,)
+            ).fetchone()
+            assert tuple(row) == (3, 0, 1)
+
+
+async def test_stale_or_unverified_body_never_releases_bamboo_quarantine(db_path: Path) -> None:
+    job = BambooHrAdapter().result(COMPANY, BOARD, NOW).jobs[0]
+    held = to_quarantined(job, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "PhD required"))
+    body = replace(job, description="Bachelor's degree welcome.")
+    async with open_repository(db_path) as repo:
+        newer = NOW + timedelta(days=1)
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="bamboohr",
+                run_started_at=newer,
+                quarantined=(replace(held, last_seen=newer),),
+                detail_fetches=(DetailFetch(id=IDENT, resolved=True),),
+            )
+        )
+        for stamp, candidate, outcomes in (
+            (newer + timedelta(hours=1), body, ()),
+            (NOW, body, (DetailFetch(id=IDENT, resolved=True),)),
+            (newer + timedelta(hours=2), job, (DetailFetch(id=IDENT, resolved=True),)),
+        ):
+            await repo.apply_source_batch(
+                SourceBatch(
+                    source="bamboohr",
+                    run_started_at=stamp,
+                    jobs=(replace(candidate, last_seen=stamp),),
+                    detail_fetches=outcomes,
+                )
+            )
+            assert await repo.get_job(IDENT) is None
+            (still_held,) = await repo.list_quarantined(QuarantineFilters(limit=None))
+            assert still_held.matched_phrase == "PhD required"
+        with closing(SqliteRepository.connect(db_path)) as check:
+            fetched = check._conn.execute(
+                "SELECT fetched_at FROM detail_fetches WHERE id = ?", (IDENT,)
+            ).fetchone()[0]
+            assert datetime.fromisoformat(fetched) == newer
+
+
+@pytest.mark.parametrize("source", ["workday", "smartrecruiters"])
+async def test_elapsed_bamboo_refresh_does_not_requeue_other_sources(
+    db_path: Path, source: str
+) -> None:
+    job = BambooHrAdapter().result(COMPANY, BOARD, NOW).jobs[0]
+    job = replace(job, source=source, id=f"{source}:example:884")
+    held = to_quarantined(job, Rejection(RejectionReason.OUT_OF_SCOPE_DEGREE, "PhD required"))
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source=source,
+                run_started_at=NOW,
+                quarantined=(held,),
+                detail_fetches=(DetailFetch(id=job.id, resolved=True),),
+            )
+        )
+        assert await repo.detail_queue(source, 10, now=NOW + timedelta(days=30)) == []
