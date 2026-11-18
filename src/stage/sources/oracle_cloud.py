@@ -28,6 +28,38 @@ DETAIL_BUDGET = 20
 PAGE_SIZE = 100
 MAX_PAGES = 16
 KEYWORD = "internship"
+_LABEL = re.compile(r"\b[\w][\w &/'’\-\s]{0,80}[:：]")
+_LABEL_WORDS = frozenset(
+    {
+        "about",
+        "and",
+        "candidate",
+        "core",
+        "criteria",
+        "description",
+        "duties",
+        "eligibility",
+        "essential",
+        "experience",
+        "job",
+        "key",
+        "minimum",
+        "overview",
+        "preferred",
+        "qualification",
+        "qualifications",
+        "required",
+        "requirement",
+        "requirements",
+        "responsibilities",
+        "responsibility",
+        "role",
+        "skill",
+        "skills",
+        "the",
+        "your",
+    }
+)
 
 
 class OraclePosting(BaseModel):
@@ -55,10 +87,13 @@ class OracleDetail(BaseModel):
     ShortDescriptionStr: NullableStr = ""
 
 
-def _text(raw: str) -> str:
+def _text(raw: str, *, omit_headings: bool = False) -> str:
     # Parse markup before decoding entities so encoded comparisons remain text.
     soup = BeautifulSoup(raw, "html.parser")
-    for element in soup(["script", "style"]):
+    omitted = ["script", "style"]
+    if omit_headings:
+        omitted.extend(("h1", "h2", "h3", "h4", "h5", "h6"))
+    for element in soup(omitted):
         element.decompose()
     return collapse_whitespace(soup.get_text(" ", strip=True))
 
@@ -77,15 +112,12 @@ def _detail_body(
     description = _text(row.ExternalDescriptionStr)
     if row.Id != identifier or not description:
         return ""
-    core = [
-        text
-        for raw in (
-            row.ExternalDescriptionStr,
-            row.ExternalResponsibilitiesStr,
-            row.ExternalQualificationsStr,
-        )
-        if (text := _text(raw))
-    ]
+    core_fields = (
+        row.ExternalDescriptionStr,
+        row.ExternalResponsibilitiesStr,
+        row.ExternalQualificationsStr,
+    )
+    core = [text for raw in core_fields if (text := _text(raw))]
     listing = [
         text.casefold()
         for raw in (summary, listing_qualifications, listing_responsibilities)
@@ -99,12 +131,22 @@ def _detail_body(
         if any(section in text for text in known):
             return False
         # A detail paragraph can assemble the same listing sections in a different order.
+        removed_known = False
         for text in (*listing, detail_summary):
-            if text:
+            if text and text in section:
                 section = section.replace(text, " ")
-        return any(char.isalnum() for char in section)
+                removed_known = True
+        # A label alone does not establish that the job's actual body is present.
+        section = _LABEL.sub(" ", section)
+        words = re.findall(r"[^\W_]+", section)
+        if not words or all(word in _LABEL_WORDS for word in words):
+            return False
+        # A lone word left after an echo could itself be an unlabelled heading.
+        return not (removed_known and len(words) == 1 and words[0].isalpha())
 
-    if known and not any(adds_content(section) for section in core):
+    if known and not any(
+        adds_content(text) for raw in core_fields if (text := _text(raw, omit_headings=True))
+    ):
         return ""
     return "\n\n".join(
         [

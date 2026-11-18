@@ -772,3 +772,79 @@ def test_reordered_assembled_listing_sections_are_still_only_summary() -> None:
         _detail_body(payload, "91731", "Build systems", "Python &amp; SQL", "Develop services")
         == ""
     )
+
+
+@pytest.mark.parametrize(
+    "qualification",
+    [
+        "Qualifications: Python",
+        "Key eligibility criteria: Python",
+        "<h3>Some new heading</h3><p>Python</p>",
+        "Qualifications Python",
+        "Eligibility Python",
+    ],
+)
+@respx.mock
+async def test_heading_around_repeated_qualification_does_not_resolve(
+    db_path: Path, qualification: str
+) -> None:
+    listing = _posting()
+    listing["ExternalQualificationsStr"] = "Python"
+    respx.get(ADAPTER.url_for(COMPANY)).respond(200, json=_listing(listing))
+    detail = respx.get(DETAIL_URL).respond(
+        200,
+        json={
+            "items": [
+                {
+                    "Id": "91731",
+                    "ExternalDescriptionStr": "Build systems",
+                    "ExternalQualificationsStr": qualification,
+                }
+            ]
+        },
+    )
+    async with _client() as client, open_repository(db_path) as repo:
+        result = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id()])
+        assert result.jobs[0].description == ""
+        assert result.detail_fetches == (DetailFetch(id=_id(), failed=True),)
+        await _persist_source_batch(
+            repo,
+            Screener(),
+            SourceBatch(
+                source=ADAPTER.name, run_started_at=NOW, detail_fetches=result.detail_fetches
+            ),
+            result.jobs,
+        )
+        assert await repo.detail_queue(ADAPTER.name, 1, now=NOW) == [_id()]
+        stored = await repo.get_job(_id())
+        assert stored is not None and stored.description == ""
+        detail.respond(
+            200,
+            json={
+                "items": [
+                    {
+                        "Id": "91731",
+                        "ExternalDescriptionStr": "Build systems",
+                        "ExternalQualificationsStr": (
+                            "Qualifications: Python. Must have 2 years of experience."
+                        ),
+                    }
+                ]
+            },
+        )
+        full = await ADAPTER.fetch(COMPANY, client, NOW, details=[_id()])
+        assert full.detail_fetches == (DetailFetch(id=_id(), resolved=True),)
+        assert "Must have 2 years of experience" in full.jobs[0].description
+
+
+def test_ambiguous_single_word_after_listing_echo_is_not_full() -> None:
+    payload = {
+        "items": [
+            {
+                "Id": "91731",
+                "ExternalDescriptionStr": "Build systems",
+                "ExternalQualificationsStr": "Python Innovation",
+            }
+        ]
+    }
+    assert _detail_body(payload, "91731", "Build systems", "Python") == ""
