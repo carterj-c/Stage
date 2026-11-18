@@ -4007,3 +4007,251 @@ async def test_stale_hydration_evidence_never_replaces_newer_verified_body(
         assert held.feed_summary == newer.feed_summary
         assert held.rejection_evidence == phd
         assert held.unverified_description == ""
+
+
+@respx.mock
+async def test_muse_fresh_full_body_releases_hydrated_rejection_only_after_screening(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.domain import JobFilters, RejectionReason
+    from stage.sources.themuse import TheMuseFeed
+
+    feed = TheMuseFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"themuse": feed})
+
+    def page(contents: str) -> dict[str, object]:
+        return {
+            "results": [
+                {
+                    "id": 123,
+                    "name": "Software Engineer Intern",
+                    "company": {"name": "Acme"},
+                    "locations": [{"name": "Toronto, Canada"}],
+                    "refs": {"landing_page": "https://boards.greenhouse.io/acme/jobs/123"},
+                    "contents": contents,
+                    "categories": [{"name": "Software Engineering"}],
+                }
+            ],
+            "page_count": 1,
+        }
+
+    respx.get(url__startswith="https://www.themuse.com/api/public/jobs").mock(
+        side_effect=[
+            httpx.Response(200, json=page("")),
+            httpx.Response(200, json=page("")),
+            httpx.Response(200, json=page("<p>Build software systems. PhD required.</p>")),
+            httpx.Response(
+                200, json=page("<p>Build software systems. Bachelor's degree welcome.</p>")
+            ),
+            httpx.Response(200, json=page("")),
+        ]
+    )
+    detail = respx.get(GH + "123").respond(
+        200, json=payload(body="Applicants must be enrolled in a PhD program.")
+    )
+    async with open_repository(db_path) as repo:
+
+        async def run(hours: int) -> None:
+            _ = [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [],
+                    sources=["themuse"],
+                    now_fn=clock_at(NOW + timedelta(hours=hours)),
+                    close_orphans=False,
+                    still_open=False,
+                )
+            ]
+
+        for hours in (0, 6, 12):
+            await run(hours)
+            assert not await repo.list_jobs(JobFilters(source="themuse", limit=None))
+            entries = await repo.list_quarantined(QuarantineFilters(source="themuse"))
+            assert len(entries) == 1 and entries[0].reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+            assert "PhD" in entries[0].verified_description
+        await run(18)
+        jobs = await repo.list_jobs(JobFilters(source="themuse", limit=None))
+        assert len(jobs) == 1
+        assert jobs[0].description == "Build software systems. Bachelor's degree welcome."
+        assert not await repo.list_quarantined(QuarantineFilters(source="themuse"))
+        with sqlite3.connect(db_path) as conn:
+            assert (
+                conn.execute(
+                    "SELECT 1 FROM detail_fetches WHERE id = ?",
+                    (FEED_REJECTION_PREFIX + jobs[0].id,),
+                ).fetchone()
+                is None
+            )
+        await run(24)
+        jobs = await repo.list_jobs(JobFilters(source="themuse", limit=None))
+        assert (
+            len(jobs) == 1
+            and jobs[0].description == "Build software systems. Bachelor's degree welcome."
+        )
+    assert detail.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("concurrent", ["quarantine", "job", "marker"])
+async def test_muse_fresh_full_release_defers_on_concurrent_snapshot_change(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, concurrent: str
+) -> None:
+    from stage.domain import JobFilters
+    from stage.services.screening import normalize_batch
+    from stage.sources.themuse import TheMuseFeed
+
+    feed = TheMuseFeed()
+    monkeypatch.setattr(sync_module, "get_feeds", lambda: {"themuse": feed})
+
+    def page(contents: str) -> dict[str, object]:
+        return {
+            "results": [
+                {
+                    "id": 123,
+                    "name": "Software Engineer Intern",
+                    "company": {"name": "Acme"},
+                    "locations": [{"name": "Toronto, Canada"}],
+                    "refs": {"landing_page": "https://boards.greenhouse.io/acme/jobs/123"},
+                    "contents": contents,
+                    "categories": [{"name": "Software Engineering"}],
+                }
+            ],
+            "page_count": 1,
+        }
+
+    respx.get(url__startswith="https://www.themuse.com/api/public/jobs").mock(
+        side_effect=[
+            httpx.Response(200, json=page(""), headers={"ETag": '"v1"'}),
+            httpx.Response(
+                200, json=page("<p>Build software systems.</p>"), headers={"ETag": '"v2"'}
+            ),
+        ]
+    )
+    respx.get(GH + "123").respond(
+        200, json=payload(body="Applicants must be enrolled in a PhD program.")
+    )
+    async with open_repository(db_path) as repo:
+
+        async def run(hours: int) -> list[object]:
+            return [
+                event
+                async for event in sync_module.sync(
+                    repo,
+                    [],
+                    sources=["themuse"],
+                    now_fn=clock_at(NOW + timedelta(hours=hours)),
+                    close_orphans=False,
+                    still_open=False,
+                )
+            ]
+
+        await run(0)
+        before = (await repo.list_quarantined(QuarantineFilters(source="themuse")))[0]
+        changed = False
+
+        def racing(jobs: Sequence[Job]) -> tuple[tuple[Job, ...], tuple[QuarantinedJob, ...]]:
+            nonlocal changed
+            result = normalize_batch(jobs)
+            if not changed:
+                with sqlite3.connect(db_path) as conn:
+                    if concurrent == "quarantine":
+                        conn.execute(
+                            "UPDATE quarantine SET verified_description = ? WHERE id = ?",
+                            ("Newer PhD requirements.", before.id),
+                        )
+                    elif concurrent == "marker":
+                        conn.execute(
+                            "UPDATE detail_fetches SET attempts = attempts + 1 WHERE id = ?",
+                            (FEED_REJECTION_PREFIX + before.id,),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO jobs (id, source, company, title_raw, title_normalized, "
+                            "apply_url_raw, description, first_seen, last_seen) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                before.id,
+                                "themuse",
+                                "Acme",
+                                before.title_raw,
+                                before.title_raw,
+                                before.apply_url_raw,
+                                "Newer concurrently stored body.",
+                                NOW.isoformat(),
+                                NOW.isoformat(),
+                            ),
+                        )
+                changed = True
+            return result
+
+        monkeypatch.setattr("stage.services.screening.normalize_batch", racing)
+        events = await run(6)
+        assert isinstance(events[-1], SyncFinished) and events[-1].outcome.value == "partial"
+        entries = await repo.list_quarantined(QuarantineFilters(source="themuse"))
+        assert len(entries) == 1
+        if concurrent == "quarantine":
+            assert entries[0].verified_description == "Newer PhD requirements."
+            assert not await repo.list_jobs(JobFilters(source="themuse", limit=None))
+        elif concurrent == "marker":
+            assert entries[0].verified_description == before.verified_description
+            assert not await repo.list_jobs(JobFilters(source="themuse", limit=None))
+        else:
+            assert entries[0].verified_description == before.verified_description
+            rows = await repo.list_jobs(JobFilters(source="themuse", limit=None))
+            assert len(rows) == 1 and rows[0].description == "Newer concurrently stored body."
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute(
+                "SELECT resolved, failed FROM detail_fetches WHERE id = ?",
+                (FEED_REJECTION_PREFIX + before.id,),
+            ).fetchone() == (1, 0)
+        assert not await repo.load_validators("themuse")
+
+
+@pytest.mark.parametrize("fresh", [None, "", "  ", "Different body."])
+async def test_full_source_hold_cannot_release_without_matching_fresh_screened_body(
+    db_path: Path, fresh: str | None
+) -> None:
+    from stage.domain import DetailFetch, RejectionReason
+    from stage.storage.copies import as_job
+
+    held = QuarantinedJob(
+        id="themuse:acme:123",
+        source="themuse",
+        company="Acme",
+        title_raw="Software Engineer Intern",
+        reason=RejectionReason.OUT_OF_SCOPE_DEGREE,
+        matched_phrase="PhD",
+        first_seen=NOW,
+        last_seen=NOW,
+        apply_url_raw="https://boards.greenhouse.io/acme/jobs/123",
+        verified_description="PhD required.",
+    )
+    accepted = replace(as_job(held), description="Build software systems.")
+    async with open_repository(db_path) as repo:
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="themuse",
+                run_started_at=NOW,
+                quarantined=(held,),
+                detail_fetches=(DetailFetch(FEED_REJECTION_PREFIX + held.id, resolved=True),),
+            )
+        )
+        await repo.apply_source_batch(
+            SourceBatch(
+                source="themuse",
+                run_started_at=NOW,
+                jobs=(accepted,),
+                feed_source=True,
+                feed_full_source=True,
+                feed_expected=(),
+                feed_quarantine_expected=(held,),
+                rejection_expected=(),
+                rejection_screened=(accepted,),
+                feed_fresh_bodies=() if fresh is None else ((held.id, fresh),),
+                feed_marker_expected=await repo.feed_marker_snapshot([held.id]),
+            )
+        )
+        assert await repo.get_job(held.id) is None
+        entries = await repo.list_quarantined(QuarantineFilters(source="themuse"))
+        assert len(entries) == 1 and entries[0].verified_description == held.verified_description

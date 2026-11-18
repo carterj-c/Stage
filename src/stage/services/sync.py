@@ -989,6 +989,11 @@ async def _persist_source_batch(
         if batch.feed_source and ids
         else []
     )
+    feed_markers = (
+        await repository.feed_marker_snapshot([entry.id for entry in feed_quarantine])
+        if batch.feed_source and batch.feed_full_source
+        else None
+    )
     pending_ids = (
         await repository.feed_pending_ids(ids) if batch.source == "hanzili" and ids else set()
     )
@@ -1163,6 +1168,12 @@ async def _persist_source_batch(
             rejection_expected=tuple(expected),
             rejection_screened=tuple(screened),
             feed_expected=tuple(feed_snapshot) if batch.feed_source else None,
+            feed_fresh_bodies=(
+                tuple((ident, body) for ident, body in incoming_full.items() if body.strip())
+                if batch.feed_full_source
+                else ()
+            ),
+            feed_marker_expected=feed_markers,
             feed_quarantine_expected=tuple(feed_quarantine),
             feed_quarantine_identities=quarantine_identities,
         )

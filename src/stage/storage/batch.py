@@ -61,6 +61,7 @@ from stage.storage.sql import (
     Store,
     board_rows,
     count,
+    feed_marker_snapshot,
     from_text,
     link_of,
     listed,
@@ -497,6 +498,29 @@ def _record_reads(
     )
 
 
+def _fresh_full_release_ids(batch: SourceBatch) -> set[str]:
+    if not (
+        batch.feed_source
+        and batch.feed_full_source
+        and batch.feed_expected is not None
+        and batch.rejection_expected is not None
+        and batch.feed_marker_expected is not None
+    ):
+        return set()
+    raw = dict(batch.feed_fresh_bodies)
+    screened = {entry.id: entry for entry in batch.rejection_screened}
+    quarantined = {entry.id for entry in batch.feed_quarantine_expected}
+    return {
+        entry.id
+        for entry in batch.jobs
+        if entry.id in quarantined
+        and (body := raw.get(entry.id, "")).strip()
+        and entry.description == body
+        and (read := screened.get(entry.id)) is not None
+        and read.description == body
+    }
+
+
 def _hold_feed_rejections(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
     if batch.hydration_expected is not None:
         return batch
@@ -523,6 +547,7 @@ def _hold_feed_rejections(conn: sqlite3.Connection, batch: SourceBatch) -> Sourc
             ),
         )
     }
+    held.difference_update(_fresh_full_release_ids(batch))
     conn.executemany(
         "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
         [(to_text(incoming[ident]), ident) for ident in held],
@@ -622,6 +647,12 @@ def _protect_screened_feed_rows(
     rejected_entries = {entry.id: entry for entry in batch.quarantined}
     accepted = {entry.id: entry for entry in batch.jobs}
     identities = [entry.id for entry in batch.jobs] + [entry.id for entry in batch.quarantined]
+    if batch.feed_marker_expected is not None:
+        current_markers = feed_marker_snapshot(
+            conn, [entry.id for entry in batch.feed_quarantine_expected]
+        )
+        if current_markers != batch.feed_marker_expected:
+            blocked.update(identities)
     if batch.feed_quarantine_identities:
         rows = conn.execute(
             "SELECT * FROM quarantine WHERE source = ? AND rejection_evidence <> ''",
@@ -999,7 +1030,11 @@ class BatchWriter(Store):
                 f"DELETE FROM quarantine WHERE id IN {EACH}",
                 (listed(job.id for job in jobs if seen.get(job.id, _UNSEEN).rejected is not None),),
             )
-
+            releases = _fresh_full_release_ids(batch) & {job.id for job in jobs}
+            conn.execute(
+                f"DELETE FROM detail_fetches WHERE id IN {EACH}",
+                (listed(FEED_REJECTION_PREFIX + ident for ident in releases),),
+            )
             _crawl(conn, batch, stamp)
             touched = _touch(conn, batch, stamp)
             closed, shut, held_urls = _close(conn, batch, stamp)

@@ -148,6 +148,11 @@ class AsyncRepository:
             lambda repository: repository.feed_quarantined(ids, source, identities)
         )
 
+    async def feed_marker_snapshot(
+        self, ids: Collection[str]
+    ) -> tuple[tuple[str, str, str, int, int, int], ...]:
+        return await self._writer.run(lambda repository: repository.feed_marker_snapshot(ids))
+
     async def feed_pending_ids(self, ids: Collection[str]) -> set[str]:
         return await self._writer.run(lambda repository: repository.feed_pending_ids(ids))
 

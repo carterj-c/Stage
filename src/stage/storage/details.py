@@ -42,6 +42,7 @@ from stage.storage.sql import (
     EACH,
     Store,
     count,
+    feed_marker_snapshot,
     from_text,
     link_of,
     listed,
@@ -235,6 +236,11 @@ class DetailFetches(Store):
             for entry in map(quarantined_from, rows)
             if entry.id in wanted or posting_identity(entry.apply_url_raw) in identity_set
         ]
+
+    def feed_marker_snapshot(
+        self, ids: Collection[str]
+    ) -> tuple[tuple[str, str, str, int, int, int], ...]:
+        return feed_marker_snapshot(self._conn, ids)
 
     def feed_pending_ids(self, ids: Collection[str]) -> set[str]:
         rows = self._conn.execute(
