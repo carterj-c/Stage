@@ -92,4 +92,5 @@ def to_quarantined(job: Job, rejection: Rejection) -> QuarantinedJob:
         matched_phrase=rejection.matched_phrase,
         employment_type=job.signals.employment_type,
         category=job.signals.category,
+        feed_summary=job.feed_summary,
     )

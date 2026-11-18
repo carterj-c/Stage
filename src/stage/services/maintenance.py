@@ -147,6 +147,14 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
             if not pass_number:
                 examined += len(stored)
             pending = [job for job in stored if settled.get(job.id) != job]
+            protected = (
+                {
+                    entry.id
+                    for entry in await repository.verified_feed_jobs([job.id for job in pending])
+                }
+                if pending
+                else set()
+            )
             candidates, rejected = _reclassifications(pending) if pending else ((), ())
             rejected_ids = {entry.id for entry in rejected}
             changed: list[Job] = []
@@ -167,6 +175,14 @@ async def rescreen(repository: AsyncRepository, *, now: datetime | None = None) 
                         run_started_at=moment,
                         jobs=tuple(entry for entry in updates if entry.source == source),
                         quarantined=tuple(entry for entry in rejected if entry.source == source),
+                        rejection_expected=tuple(
+                            entry
+                            for entry in pending
+                            if entry.source == source and entry.id in protected
+                        ),
+                        rejection_screened=tuple(
+                            entry for entry in pending if entry.source == source
+                        ),
                     )
                 )
                 if applied.successors:
@@ -212,7 +228,8 @@ async def _reclassify_quarantine(repository: AsyncRepository) -> int:
                 title_raw=entry.title_raw,
                 title_normalized=fold(entry.title_raw),
                 apply_url_raw=entry.apply_url_raw,
-                description="",
+                description=entry.verified_description,
+                feed_summary=entry.feed_summary,
                 first_seen=entry.first_seen,
                 last_seen=entry.last_seen,
                 location_raw=entry.location_raw,
@@ -293,6 +310,7 @@ def _reclassifications(
         resolve_listing,
         shown_company,
     )
+    from stage.services.screening import combine_summary_evidence
 
     candidates: list[Job] = []
     rejected: list[QuarantinedJob] = []
@@ -327,6 +345,7 @@ def _reclassifications(
             or screen_degree_scope(candidate)
             or screen_is_cs_role(candidate)
         )
+        candidate, rejection = combine_summary_evidence(candidate, rejection)
         if rejection is not None:
             rejected.append(to_quarantined(candidate, rejection))
         candidates.append(candidate)

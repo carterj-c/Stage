@@ -20,8 +20,15 @@ from stage.domain import (
     RoleCategory,
     board_of,
 )
+from stage.domain.hydration_target import posting_identity
 from stage.domain.liveness import BOARD_SOURCES, CHECK_PREFIX
 from stage.domain.text import is_workday_opening
+from stage.domain.visits import (
+    FEED_DECISION_PREFIX,
+    FEED_DETAIL_PREFIX,
+    FEED_PENDING_PREFIX,
+    FEED_REJECTION_PREFIX,
+)
 from stage.storage.copies import (
     copies_of_rejected,
     duplicate_candidates,
@@ -37,6 +44,7 @@ from stage.storage.rows import (
     UPSERT_DETAIL,
     UPSERT_FACET,
     UPSERT_JOB,
+    UPSERT_PUSHBACK,
     UPSERT_QUARANTINE,
     UPSERT_RATE_STATE,
     UPSERT_VALIDATOR,
@@ -53,11 +61,13 @@ from stage.storage.sql import (
     Store,
     board_rows,
     count,
+    feed_marker_snapshot,
     from_text,
     link_of,
     listed,
     marks,
     to_text,
+    verified_feed_hold,
 )
 from stage.storage.upkeep import (
     heirs_of,
@@ -428,6 +438,28 @@ def _record_reads(
             for entry in batch.detail_fetches
         ],
     )
+    if batch.hydration_expected is not None:
+        verified = {
+            entry.id.removeprefix(FEED_DETAIL_PREFIX)
+            for entry in batch.detail_fetches
+            if entry.id.startswith(FEED_DETAIL_PREFIX) and entry.resolved and not entry.failed
+        }
+        screened = {entry.id for entry in batch.jobs} | {entry.id for entry in batch.quarantined}
+        conn.executemany(
+            UPSERT_DETAIL,
+            [
+                (FEED_DECISION_PREFIX + ident, batch.source, stamp, 1, 1, 0)
+                for ident in verified & screened
+            ],
+        )
+        conn.executemany(
+            UPSERT_DETAIL,
+            [
+                (FEED_REJECTION_PREFIX + entry.id, batch.source, stamp, 1, 1, 0)
+                for entry in batch.quarantined
+                if entry.id in verified
+            ],
+        )
     conn.executemany(
         "DELETE FROM workday_facets WHERE tenant = ? AND site = ?",
         [(facet.tenant, facet.site) for facet in batch.forgotten_facets],
@@ -447,7 +479,8 @@ def _record_reads(
             if not facet.pinned
         ],
     )
-    conn.executemany(UPSERT_RATE_STATE, [rate_state_params(state) for state in batch.rate_state])
+    rate_sql = UPSERT_RATE_STATE if batch.hydration_expected is None else UPSERT_PUSHBACK
+    conn.executemany(rate_sql, [rate_state_params(state) for state in batch.rate_state])
     conn.execute(f"DELETE FROM http_cache WHERE url IN {EACH}", (listed(held),))
     conn.executemany(
         UPSERT_VALIDATOR,
@@ -462,6 +495,323 @@ def _record_reads(
             for validator in batch.validators
             if validator.url not in held
         ],
+    )
+
+
+def _fresh_full_release_ids(batch: SourceBatch) -> set[str]:
+    if not (
+        batch.feed_source
+        and batch.feed_full_source
+        and batch.feed_expected is not None
+        and batch.rejection_expected is not None
+        and batch.feed_marker_expected is not None
+    ):
+        return set()
+    raw = dict(batch.feed_fresh_bodies)
+    screened = {entry.id: entry for entry in batch.rejection_screened}
+    quarantined = {entry.id for entry in batch.feed_quarantine_expected}
+    return {
+        entry.id
+        for entry in batch.jobs
+        if entry.id in quarantined
+        and (body := raw.get(entry.id, "")).strip()
+        and entry.description == body
+        and (read := screened.get(entry.id)) is not None
+        and read.description == body
+    }
+
+
+def _hold_feed_rejections(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
+    if batch.hydration_expected is not None:
+        return batch
+    incoming = {job.id: job.last_seen for job in batch.jobs}
+    incoming.update({entry.id: entry.last_seen for entry in batch.quarantined})
+    if not incoming:
+        return batch
+    held = {
+        str(row["id"])
+        for row in conn.execute(
+            f"SELECT q.id FROM quarantine q WHERE q.id IN {EACH} AND q.source = ? "
+            f"AND ({verified_feed_hold('q')} OR (? = 0 AND q.rejection_evidence <> '') "
+            "OR (? = 0 AND EXISTS "
+            "(SELECT 1 FROM detail_fetches p WHERE p.id = ? || q.id)))",
+            (
+                listed(incoming),
+                batch.source,
+                FEED_REJECTION_PREFIX,
+                FEED_DECISION_PREFIX,
+                FEED_DETAIL_PREFIX,
+                int(batch.feed_source),
+                int(batch.feed_source),
+                FEED_PENDING_PREFIX,
+            ),
+        )
+    }
+    held.difference_update(_fresh_full_release_ids(batch))
+    conn.executemany(
+        "UPDATE quarantine SET last_seen = MAX(last_seen, ?) WHERE id = ?",
+        [(to_text(incoming[ident]), ident) for ident in held],
+    )
+    return replace(
+        batch,
+        jobs=tuple(job for job in batch.jobs if job.id not in held),
+        quarantined=tuple(entry for entry in batch.quarantined if entry.id not in held),
+    )
+
+
+def _guard_hydration(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
+    if batch.hydration_expected is None:
+        return batch
+    allowed = set()
+    for expected in batch.hydration_expected:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (expected.id,)).fetchone()
+        if row is not None and job_from(row) == expected:
+            allowed.add(expected.id)
+    for expected_pending in batch.pending_expected:
+        row = conn.execute(
+            "SELECT q.* FROM quarantine q JOIN detail_fetches p ON p.id = ? || q.id "
+            "JOIN source_visits v ON v.source = q.source AND v.board = q.source "
+            "WHERE q.id = ? AND q.source = 'hanzili' AND p.resolved = 1 AND p.failed = 0 "
+            "AND v.last_success_at IS NOT NULL AND v.consecutive_failures = 0 "
+            f"AND q.rejection_evidence = '' AND NOT {verified_feed_hold('q')}",
+            (
+                FEED_PENDING_PREFIX,
+                expected_pending.id,
+                FEED_REJECTION_PREFIX,
+                FEED_DECISION_PREFIX,
+                FEED_DETAIL_PREFIX,
+            ),
+        ).fetchone()
+        if row is not None and quarantined_from(row) == expected_pending:
+            allowed.add(expected_pending.id)
+    blocked_hydration: set[str] = set()
+    if batch.source == "hanzili" and allowed:
+        rows = conn.execute(
+            "SELECT q.* FROM quarantine q WHERE q.source = 'hanzili' "
+            f"AND (q.rejection_evidence <> '' OR {verified_feed_hold('q')})",
+            (FEED_REJECTION_PREFIX, FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX),
+        )
+        held_identities = {
+            identity
+            for entry in map(quarantined_from, rows)
+            if (identity := posting_identity(entry.apply_url_raw)) is not None
+        }
+        complete = {
+            entry.id.removeprefix(FEED_DETAIL_PREFIX)
+            for entry in batch.detail_fetches
+            if entry.id.startswith(FEED_DETAIL_PREFIX) and entry.resolved and not entry.failed
+        }
+        held_identities.update(
+            identity
+            for entry in batch.quarantined
+            if entry.id in allowed
+            and entry.id in complete
+            and (identity := posting_identity(entry.apply_url_raw)) is not None
+        )
+        blocked_hydration = {
+            entry.id
+            for entry in batch.jobs
+            if entry.id in allowed
+            and (identity := posting_identity(entry.apply_url_raw)) is not None
+            and identity in held_identities
+        }
+    return replace(
+        batch,
+        jobs=tuple(job for job in batch.jobs if job.id in allowed - blocked_hydration),
+        quarantined=tuple(entry for entry in batch.quarantined if entry.id in allowed),
+        rejection_screened=tuple(
+            entry for entry in batch.rejection_screened if entry.id in allowed
+        ),
+        detail_fetches=tuple(
+            replace(entry, resolved=False, failed=True)
+            if entry.id.removeprefix(FEED_DETAIL_PREFIX) in blocked_hydration
+            else entry
+            for entry in batch.detail_fetches
+            if entry.id.removeprefix(FEED_DETAIL_PREFIX) in allowed
+        ),
+    )
+
+
+def _protect_screened_feed_rows(
+    conn: sqlite3.Connection, batch: SourceBatch
+) -> tuple[SourceBatch, tuple[str, ...], int]:
+    if batch.rejection_expected is None or not (batch.jobs or batch.quarantined):
+        return batch, (), 0
+    expected = {job.id: job for job in batch.rejection_expected}
+    feed_expected = {job.id: job for job in (batch.feed_expected or ())}
+    quarantine_expected = {entry.id: entry for entry in batch.feed_quarantine_expected}
+    screened = {job.id: job for job in batch.rejection_screened}
+    verified: list[str] = []
+    blocked: set[str] = set()
+    rejected_ids = {entry.id for entry in batch.quarantined}
+    rejected_entries = {entry.id: entry for entry in batch.quarantined}
+    accepted = {entry.id: entry for entry in batch.jobs}
+    identities = [entry.id for entry in batch.jobs] + [entry.id for entry in batch.quarantined]
+    if batch.feed_marker_expected is not None:
+        current_markers = feed_marker_snapshot(
+            conn, [entry.id for entry in batch.feed_quarantine_expected]
+        )
+        if current_markers != batch.feed_marker_expected:
+            blocked.update(identities)
+    if batch.feed_quarantine_identities:
+        rows = conn.execute(
+            "SELECT * FROM quarantine WHERE source = ? AND rejection_evidence <> ''",
+            (batch.source,),
+        )
+        current_url_holds = {
+            entry.id: entry
+            for entry in map(quarantined_from, rows)
+            if posting_identity(entry.apply_url_raw) in batch.feed_quarantine_identities
+        }
+        expected_url_holds = {
+            entry.id: entry
+            for entry in batch.feed_quarantine_expected
+            if entry.source == batch.source
+            and posting_identity(entry.apply_url_raw) in batch.feed_quarantine_identities
+            and entry.rejection_evidence
+        }
+        if current_url_holds != expected_url_holds:
+            blocked.update(identities)
+    for ident in identities:
+        if batch.feed_expected is not None:
+            latest = conn.execute("SELECT * FROM jobs WHERE id = ?", (ident,)).fetchone()
+            current_feed = job_from(latest) if latest is not None else None
+            current_rejected = conn.execute(
+                "SELECT * FROM quarantine WHERE id = ?", (ident,)
+            ).fetchone()
+            current_quarantine = (
+                quarantined_from(current_rejected) if current_rejected is not None else None
+            )
+            if current_feed != feed_expected.get(
+                ident
+            ) or current_quarantine != quarantine_expected.get(ident):
+                blocked.add(ident)
+                continue
+        row = conn.execute(
+            "SELECT j.* FROM jobs j JOIN detail_fetches d ON d.id = ? || j.id "
+            "JOIN detail_fetches f ON f.id = ? || j.id "
+            "WHERE j.id = ? AND j.description <> '' AND d.resolved = 1 AND d.failed = 0 "
+            "AND f.resolved = 1 AND f.failed = 0",
+            (FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX, ident),
+        ).fetchone()
+        if row is None and ident not in expected:
+            continue
+        current = job_from(row) if row is not None else None
+        original, read = expected.get(ident), screened.get(ident)
+        if (
+            current is None
+            or original != current
+            or read is None
+            or not read.description
+            or (batch.feed_summary_source and read.description != current.description)
+            or (ident in rejected_ids and rejected_entries[ident].feed_summary != read.feed_summary)
+            or (
+                ident in accepted
+                and (
+                    accepted[ident].feed_summary != read.feed_summary
+                    or (
+                        batch.feed_summary_source
+                        and accepted[ident].description != current.description
+                    )
+                )
+            )
+        ):
+            blocked.add(ident)
+        elif ident in rejected_ids and read.description == current.description:
+            verified.append(ident)
+    if blocked:
+        batch = replace(
+            batch,
+            jobs=tuple(entry for entry in batch.jobs if entry.id not in blocked),
+            quarantined=tuple(entry for entry in batch.quarantined if entry.id not in blocked),
+            closable_boards=(),
+            unchanged_boards=(),
+            closes_whole_source=False,
+        )
+        if batch.feed_source:
+            conn.execute("DELETE FROM http_cache WHERE source = ?", (batch.source,))
+            conn.execute("DELETE FROM source_visits WHERE source = ?", (batch.source,))
+            batch = replace(batch, validators=(), visits=(), detail_fetches=(), board_urls=())
+    return batch, tuple(verified), len(blocked)
+
+
+def _hold_matching_hydrated_jobs(conn: sqlite3.Connection, batch: SourceBatch) -> SourceBatch:
+    if batch.source != "hanzili" or not (batch.feed_source or batch.hydration_expected is not None):
+        return batch
+    rejections: dict[str, QuarantinedJob] = {}
+    rows = conn.execute(
+        "SELECT q.* FROM quarantine q WHERE q.source = 'hanzili' "
+        f"AND (q.rejection_evidence <> '' OR {verified_feed_hold('q')})",
+        (FEED_REJECTION_PREFIX, FEED_DECISION_PREFIX, FEED_DETAIL_PREFIX),
+    )
+    existing = tuple(map(quarantined_from, rows))
+    for entry in existing:
+        identity = posting_identity(entry.apply_url_raw)
+        evidence = entry.rejection_evidence or entry.verified_description or entry.feed_summary
+        if identity is not None:
+            rejections.setdefault(
+                identity,
+                replace(entry, rejection_evidence=evidence or "Verified posting rejection"),
+            )
+    for entry in batch.quarantined:
+        identity = posting_identity(entry.apply_url_raw)
+        if identity is not None and entry.rejection_evidence:
+            rejections.setdefault(identity, entry)
+    if not rejections:
+        return batch
+    rows = conn.execute(
+        "SELECT j.*, EXISTS (SELECT 1 FROM detail_fetches d "
+        "JOIN detail_fetches f ON f.id = ? || j.id WHERE d.id = ? || j.id "
+        "AND d.resolved = 1 AND d.failed = 0 AND f.resolved = 1 AND f.failed = 0) "
+        "AS full_verified FROM jobs j WHERE j.source = 'hanzili' AND j.status = ?",
+        (FEED_DETAIL_PREFIX, FEED_DECISION_PREFIX, OPEN),
+    )
+    originals = {str(row["id"]): (job_from(row), bool(row["full_verified"])) for row in rows}
+    candidates = {entry.id: entry for entry in batch.jobs}
+    screened = {entry.id: entry for entry in batch.rejection_screened}
+    already_rejected = {entry.id for entry in batch.quarantined}
+    held: list[QuarantinedJob] = []
+    for ident in originals.keys() | candidates.keys():
+        current, full_verified = originals.get(ident, (None, False))
+        job = candidates.get(ident) or current
+        if job is None or ident in already_rejected:
+            continue
+        identity = posting_identity(job.apply_url_raw)
+        rejection = rejections.get(identity) if identity is not None else None
+        if rejection is None:
+            continue
+        fresh = screened.get(ident) if batch.hydration_expected is not None else None
+        body = fresh.description if fresh is not None else job.description if full_verified else ""
+        raw = current.description if current is not None and not full_verified else ""
+        if current is None and not full_verified:
+            raw = job.description
+        held.append(
+            QuarantinedJob(
+                id=job.id,
+                source=job.source,
+                company=job.company,
+                title_raw=job.title_raw,
+                reason=rejection.reason,
+                first_seen=job.first_seen,
+                last_seen=job.last_seen,
+                apply_url_raw=job.apply_url_raw,
+                location_raw=job.location_raw,
+                location=job.location,
+                remote_scope=job.remote_scope,
+                matched_phrase=rejection.matched_phrase,
+                employment_type=job.signals.employment_type,
+                category=job.signals.category,
+                feed_summary=job.feed_summary,
+                verified_description=body,
+                rejection_evidence=rejection.rejection_evidence,
+                unverified_description=raw,
+            )
+        )
+    held_ids = {entry.id for entry in held}
+    return replace(
+        batch,
+        jobs=tuple(entry for entry in batch.jobs if entry.id not in held_ids),
+        quarantined=(*batch.quarantined, *held),
     )
 
 
@@ -499,6 +849,36 @@ class BatchWriter(Store):
         started = batch.run_started_at
         stamp = to_text(started)
         with self._transaction() as conn:
+            batch = _guard_hydration(conn, batch)
+            batch, verified_rejections, conflicts = _protect_screened_feed_rows(conn, batch)
+            batch = _hold_feed_rejections(conn, batch)
+            verified = set(verified_rejections)
+            if batch.hydration_expected is not None:
+                verified.update(
+                    entry.id.removeprefix(FEED_DETAIL_PREFIX)
+                    for entry in batch.detail_fetches
+                    if entry.id.startswith(FEED_DETAIL_PREFIX)
+                    and entry.resolved
+                    and not entry.failed
+                )
+            evidence = {job.id: job.description for job in batch.rejection_screened}
+            batch = replace(
+                batch,
+                quarantined=tuple(
+                    replace(
+                        entry,
+                        verified_description=evidence[entry.id],
+                        rejection_evidence=(
+                            entry.rejection_evidence or evidence[entry.id]
+                            if entry.source == "hanzili"
+                            else entry.rejection_evidence
+                        ),
+                    )
+                    if entry.id in verified and entry.id in evidence
+                    else entry
+                    for entry in batch.quarantined
+                ),
+            )
             batch = _hold_bamboo(conn, batch)
             selected = (
                 batch.detail_queue_selected
@@ -562,6 +942,7 @@ class BatchWriter(Store):
                     )
 
                 batch = replace(batch, jobs=tuple(map(preserve_oracle_detail, batch.jobs)))
+            batch = _hold_matching_hydrated_jobs(conn, batch)
             seen = _seen(conn, [job.id for job in batch.jobs] + [e.id for e in batch.quarantined])
             without_description = [
                 job
@@ -638,9 +1019,21 @@ class BatchWriter(Store):
                     [(job.id,) for job in jobs if job.id in fresh_oracle and job.description],
                 )
             quarantined, heirs = _reject(conn, batch, batch.quarantined + diverted, known, stamp)
+            conn.executemany(
+                UPSERT_DETAIL,
+                [
+                    (FEED_REJECTION_PREFIX + ident, batch.source, stamp, 1, 1, 0)
+                    for ident in verified_rejections
+                ],
+            )
             conn.execute(
                 f"DELETE FROM quarantine WHERE id IN {EACH}",
                 (listed(job.id for job in jobs if seen.get(job.id, _UNSEEN).rejected is not None),),
+            )
+            releases = _fresh_full_release_ids(batch) & {job.id for job in jobs}
+            conn.execute(
+                f"DELETE FROM detail_fetches WHERE id IN {EACH}",
+                (listed(FEED_REJECTION_PREFIX + ident for ident in releases),),
             )
             _crawl(conn, batch, stamp)
             touched = _touch(conn, batch, stamp)
@@ -649,6 +1042,23 @@ class BatchWriter(Store):
             remember_heirs(conn, sorted(promoted.items()), stamp)
             heirs = {**heirs, **promoted}
             linked = _link_duplicates(conn, batch.resolve_duplicates, jobs)
+            if batch.feed_source and batch.board_urls:
+                conn.execute(
+                    "UPDATE detail_fetches SET resolved = 0 WHERE source = ? AND id GLOB ?",
+                    (batch.source, FEED_PENDING_PREFIX + "*"),
+                )
+            if batch.hydration_expected is not None and batch.pending_expected:
+                completed = [
+                    entry.id.removeprefix(FEED_DETAIL_PREFIX)
+                    for entry in batch.detail_fetches
+                    if entry.id.startswith(FEED_DETAIL_PREFIX)
+                    and entry.resolved
+                    and not entry.failed
+                ]
+                conn.execute(
+                    f"DELETE FROM detail_fetches WHERE id IN {EACH}",
+                    (listed(FEED_PENDING_PREFIX + ident for ident in completed),),
+                )
             _record_reads(conn, batch, stamp, held_urls)
         updated = sum(1 for job in jobs if seen.get(job.id, _UNSEEN).listed is not None)
         return SourceBatchResult(
@@ -666,4 +1076,5 @@ class BatchWriter(Store):
                 (batch.source, OPEN),
             ),
             successors=tuple(sorted(heirs.items())),
+            conflicts=conflicts,
         )

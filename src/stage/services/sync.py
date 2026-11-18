@@ -35,7 +35,9 @@ from stage.domain import (
     HttpValidator,
     Job,
     PlannedRequest,
+    QuarantinedJob,
     RateState,
+    RejectionReason,
     RequestLogged,
     Rotation,
     RotationMember,
@@ -64,7 +66,10 @@ from stage.domain import (
     rotate,
     turned_away,
 )
+from stage.domain.hydration_target import posting_identity
+from stage.domain.liveness import AWAITING_PAGE
 from stage.domain.text import counted, counts_locations, did_you_mean, plain_error
+from stage.domain.visits import FEED_PENDING_PREFIX
 from stage.http import (
     CEILING_BACKSTOP,
     REFRESH_SLACK_H,
@@ -967,10 +972,212 @@ async def _persist_source_batch(
     repository: AsyncRepository, screener: Screener, batch: SourceBatch, collected: Sequence[Job]
 ) -> tuple[SourceBatchResult, float, float]:
     normalize_clock = time.perf_counter()
-    kept, rejected = await screener(await _with_stored_details(repository, collected))
+    incoming_full = {entry.id: entry.description for entry in collected}
+    ids = [job.id for job in collected]
+    feed_snapshot = await repository.feed_jobs(ids) if batch.feed_source and ids else []
+    quarantine_identities = (
+        tuple(
+            identity
+            for entry in collected
+            if (identity := posting_identity(entry.apply_url_raw)) is not None
+        )
+        if batch.feed_source and batch.source == "hanzili"
+        else ()
+    )
+    feed_quarantine = (
+        await repository.feed_quarantined(ids, batch.source, quarantine_identities)
+        if batch.feed_source and ids
+        else []
+    )
+    feed_markers = (
+        await repository.feed_marker_snapshot([entry.id for entry in feed_quarantine])
+        if batch.feed_source and batch.feed_full_source
+        else None
+    )
+    pending_ids = (
+        await repository.feed_pending_ids(ids) if batch.source == "hanzili" and ids else set()
+    )
+    expected = await repository.verified_feed_jobs(ids) if ids else []
+    if batch.feed_summary_source:
+        existing = {entry.id: entry for entry in feed_snapshot}
+        previous_rejections = {entry.id: entry for entry in feed_quarantine}
+        verified = {entry.id: entry for entry in expected}
+        prepared: list[Job] = []
+        for entry in collected:
+            old = existing.get(entry.id)
+            full = verified.get(entry.id)
+            old_rejection = previous_rejections.get(entry.id)
+            carried = _carried(entry, (old.description, old.location_raw) if old else None)
+            summary = (
+                entry.description
+                or entry.feed_summary
+                or (old.feed_summary if old else "")
+                or (old_rejection.feed_summary if old_rejection else "")
+                or (old.description if old and not full else "")
+            )
+            prepared.append(
+                replace(
+                    carried,
+                    description=full.description if full else "",
+                    feed_summary=summary,
+                )
+            )
+        screened: Sequence[Job] = tuple(prepared)
+    else:
+        previous_rejections = {entry.id: entry for entry in feed_quarantine}
+        if batch.feed_full_source:
+            collected = tuple(
+                replace(
+                    entry,
+                    description=(
+                        entry.description
+                        or (
+                            previous_rejections[entry.id].verified_description
+                            if entry.id in previous_rejections
+                            else ""
+                        )
+                    ),
+                )
+                for entry in collected
+            )
+        screened = await _with_stored_details(repository, collected)
+    kept, rejected = await screener(screened)
+    if batch.feed_source and (batch.feed_full_source or batch.source == "hanzili"):
+        from stage.classify.scope import Rejection, to_quarantined
+
+        previous = {entry.id: entry for entry in feed_quarantine}
+        previous_by_identity: dict[str, list[QuarantinedJob]] = {}
+        for held_entry in feed_quarantine:
+            identity = posting_identity(held_entry.apply_url_raw)
+            if held_entry.rejection_evidence and identity is not None:
+                previous_by_identity.setdefault(identity, []).append(held_entry)
+        screened_by_id = {entry.id: entry for entry in screened}
+        kept_by_id = {entry.id: entry for entry in kept}
+        rejected_by_id = {entry.id: entry for entry in rejected}
+        for ident, screened_job in screened_by_id.items():
+            previous_rejection = previous.get(ident)
+            if batch.source == "hanzili" and (
+                previous_rejection is None or not previous_rejection.rejection_evidence
+            ):
+                identity = posting_identity(screened_job.apply_url_raw)
+                holds = previous_by_identity.get(identity, []) if identity is not None else []
+                if holds:
+                    previous_rejection = min(holds, key=lambda entry: entry.id)
+            old_evidence = previous_rejection.rejection_evidence if previous_rejection else ""
+            if (
+                not old_evidence
+                and previous_rejection is not None
+                and batch.source == "hanzili"
+                and previous_rejection.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+                and not previous_rejection.matched_phrase.startswith("copy of ")
+            ):
+                old_evidence = previous_rejection.feed_summary
+            fresh_full = batch.feed_full_source and bool(incoming_full.get(ident))
+            if (
+                old_evidence
+                and not fresh_full
+                and ident in kept_by_id
+                and previous_rejection is not None
+            ):
+                normalized = kept_by_id.pop(ident)
+                rejected_by_id[ident] = to_quarantined(
+                    normalized,
+                    Rejection(previous_rejection.reason, previous_rejection.matched_phrase),
+                )
+            item = rejected_by_id.get(ident)
+            if item is None:
+                continue
+            if old_evidence and not fresh_full and previous_rejection is not None:
+                item = replace(
+                    item,
+                    reason=previous_rejection.reason,
+                    matched_phrase=previous_rejection.matched_phrase,
+                )
+            evidence = old_evidence
+            if (
+                not evidence
+                and batch.source == "hanzili"
+                and item.reason is RejectionReason.OUT_OF_SCOPE_DEGREE
+                and not screened_job.description
+                and not item.matched_phrase.startswith("copy of ")
+            ):
+                evidence = item.feed_summary
+            if batch.feed_full_source and screened_job.description:
+                evidence = evidence or screened_job.description
+            rejected_by_id[ident] = replace(
+                item,
+                rejection_evidence=evidence,
+                verified_description=(
+                    screened_job.description
+                    if batch.feed_full_source and screened_job.description
+                    else previous_rejection.verified_description
+                    if previous_rejection is not None
+                    else ""
+                ),
+            )
+        kept = tuple(kept_by_id.values())
+        rejected = tuple(rejected_by_id.values())
+    if batch.feed_source and batch.source == "hanzili":
+        from stage.classify import screen_is_cs_role
+        from stage.services.hydration_targets import target_for_url
+
+        by_id = {entry.id: entry for entry in screened}
+        previous_jobs = {entry.id for entry in feed_snapshot}
+        previous_quarantine = {entry.id for entry in feed_quarantine}
+        pending: list[DetailFetch] = []
+        refreshed = []
+        for item in rejected:
+            candidate = by_id.get(item.id)
+            if candidate is None:
+                refreshed.append(item)
+                continue
+            target = target_for_url(candidate.apply_url_raw)
+            probe = screen_is_cs_role(replace(candidate, source="workday", description=""))
+            safe = (
+                candidate.id not in previous_jobs
+                and (candidate.id not in previous_quarantine or candidate.id in pending_ids)
+                and candidate.source_posted_at is None
+                and candidate.duplicate_of is None
+                and not candidate.description
+                and not candidate.signals.terms
+                and not candidate.signals.season
+                and not candidate.signals.sponsorship
+                and not candidate.signals.degrees
+                and item.reason in {RejectionReason.UNKNOWN_CS_ROLE, RejectionReason.NOT_A_CS_ROLE}
+                and target is not None
+                and probe is not None
+                and probe.reason is RejectionReason.UNKNOWN_CS_ROLE
+                and probe.matched_phrase.endswith(AWAITING_PAGE)
+            )
+            if safe and probe is not None:
+                refreshed.append(
+                    replace(item, reason=probe.reason, matched_phrase=probe.matched_phrase)
+                )
+                pending.append(DetailFetch(FEED_PENDING_PREFIX + item.id, resolved=True))
+            else:
+                refreshed.append(item)
+        rejected = tuple(refreshed)
+        batch = replace(batch, detail_fetches=(*batch.detail_fetches, *pending))
     normalize_ms = _since(normalize_clock)
     write_clock = time.perf_counter()
-    counts = await repository.apply_source_batch(replace(batch, jobs=kept, quarantined=rejected))
+    counts = await repository.apply_source_batch(
+        replace(
+            batch,
+            jobs=kept,
+            quarantined=rejected,
+            rejection_expected=tuple(expected),
+            rejection_screened=tuple(screened),
+            feed_expected=tuple(feed_snapshot) if batch.feed_source else None,
+            feed_fresh_bodies=(
+                tuple((ident, body) for ident, body in incoming_full.items() if body.strip())
+                if batch.feed_full_source
+                else ()
+            ),
+            feed_marker_expected=feed_markers,
+            feed_quarantine_expected=tuple(feed_quarantine),
+            feed_quarantine_identities=quarantine_identities,
+        )
+    )
     if counts.successors:
         from stage.services.tracker import follow_recorded
 
@@ -1521,6 +1728,9 @@ async def _run_feed_source(
         SourceBatch(
             source=source,
             run_started_at=run_started_at,
+            feed_source=True,
+            feed_summary_source=bool(getattr(feed, "description_is_summary", False)),
+            feed_full_source=bool(getattr(feed, "description_is_full", False)),
             validators=validators,
             rate_state=settled,
             resolve_duplicates=resolve_duplicates,
@@ -1531,6 +1741,16 @@ async def _run_feed_source(
         ),
         harvest.collected,
     )
+    if counts.conflicts:
+        harvest.succeeded = False
+        harvest.deferred_boards += 1
+        if source in ledger.first_reads:
+            ledger.first_reads.remove(source)
+        yield CompanyDeferred(
+            source=source,
+            company=label,
+            reason="Posting changed during screening, so the feed will be read again",
+        )
     yield ledger.settle(
         source,
         harvest,
@@ -1621,6 +1841,40 @@ async def sync(
         async with aclosing(_merge(streams, ledger)) as merged:
             async for event in merged:
                 yield event
+        if not dry_run and feeds:
+            from stage.services.feed_hydration import hydrate_feeds
+
+            hydrated = await hydrate_feeds(
+                repository,
+                tuple(feeds),
+                ledger.screener,
+                now=now_fn(),
+                budgets=budgets,
+                postures=postures,
+                rng=shuffler,
+                pending_sources=tuple(
+                    source
+                    for source in feeds
+                    if source not in set(ledger.failed) | set(ledger.blocked) | set(ledger.deferred)
+                ),
+            )
+            for record in hydrated.requests:
+                yield record
+            _count_check_requests(ledger, hydrated.requests)
+            for counts in hydrated.batches:
+                index = next(
+                    (i for i, stat in enumerate(ledger.stats) if stat.source == counts.source), None
+                )
+                if index is None:
+                    ledger.stats.append(SourceRunStats(source=counts.source))
+                    index = len(ledger.stats) - 1
+                stat = ledger.stats[index]
+                ledger.stats[index] = replace(
+                    stat,
+                    added=stat.added + counts.added,
+                    updated=stat.updated + counts.updated,
+                    quarantined=stat.quarantined + counts.quarantined,
+                )
     finally:
         sys.setswitchinterval(switch)
         parse_pages_with(None)

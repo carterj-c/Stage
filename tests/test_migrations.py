@@ -271,3 +271,293 @@ def test_a_hidden_file_beside_the_migrations_is_ignored(
     monkeypatch.setattr(migrations, "_MIGRATIONS_DIR", folder)
 
     assert [migration.name for migration in migrations.discover()] == expected
+
+
+def test_feed_summary_migration_preserves_existing_jobs_and_quarantine(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from stage.storage import migrations
+
+    shipped = migrations.discover()
+    previous = tuple(entry for entry in shipped if entry.version < 7)
+    assert [entry.version for entry in previous] == [1, 2, 3, 4, 5, 6]
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: previous)
+        old = SqliteRepository.connect(db_path)
+        old._conn.execute(
+            "INSERT INTO jobs (id, source, company, title_raw, title_normalized, apply_url_raw, "
+            "description, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "feed:acme:1",
+                "feed",
+                "Acme",
+                "Intern",
+                "intern",
+                "https://example.com/1",
+                "Full original detail",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old._conn.execute(
+            "INSERT INTO jobs (id, source, company, title_raw, title_normalized, apply_url_raw, "
+            "description, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "hanzili:acme:1",
+                "hanzili",
+                "Acme",
+                "Intern",
+                "intern",
+                "https://boards.greenhouse.io/acme/jobs/123",
+                "Short summary",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old._conn.execute(
+            "INSERT INTO jobs (id, source, company, title_raw, title_normalized, apply_url_raw, "
+            "description, work_auth_flag, first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "hanzili:acme:restricted",
+                "hanzili",
+                "Acme",
+                "Intern",
+                "intern",
+                "https://boards.greenhouse.io/acme/jobs/124",
+                "US citizens only",
+                1,
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old._conn.execute(
+            "INSERT INTO quarantine (id, source, company, title_raw, reason, "
+            "first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "feed:acme:2",
+                "feed",
+                "Acme",
+                "Intern",
+                "out-of-scope-degree",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old.close()
+    upgraded = SqliteRepository.connect(db_path)
+    try:
+        job = upgraded.get_job("feed:acme:1")
+        assert (
+            job is not None and job.description == "Full original detail" and job.feed_summary == ""
+        )
+        legacy = upgraded.get_job("hanzili:acme:1")
+        assert (
+            legacy is not None
+            and legacy.description == ""
+            and legacy.feed_summary == "Short summary"
+            and legacy.work_auth_flag is None
+        )
+        restricted = upgraded.get_job("hanzili:acme:restricted")
+        assert restricted is not None and restricted.work_auth_flag is True
+        summary = upgraded._conn.execute(
+            "SELECT feed_summary, verified_description FROM quarantine WHERE id = ?",
+            ("feed:acme:2",),
+        ).fetchone()
+        assert summary is not None and tuple(summary) == ("", "")
+        assert applied_versions(upgraded._conn) == tuple(range(1, 10))
+    finally:
+        upgraded.close()
+    assert len(_snapshots(db_path)) == 1
+
+
+def test_quarantine_evidence_migration_preserves_direct_hanzili_rejections(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.storage import migrations
+
+    shipped = migrations.discover()
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: tuple(m for m in shipped if m.version < 8))
+        old = SqliteRepository.connect(db_path)
+        for ident, matched, summary in (
+            ("hanzili:1", "PhD", "PhD required"),
+            ("hanzili:2", "copy of another rejected for phd", "PhD required"),
+            ("hanzili:3", "PhD", ""),
+        ):
+            old._conn.execute(
+                "INSERT INTO quarantine (id, source, company, title_raw, reason, matched_phrase, "
+                "feed_summary, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ident,
+                    "hanzili",
+                    "Acme",
+                    "Intern",
+                    "out-of-scope-degree",
+                    matched,
+                    summary,
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-02T00:00:00+00:00",
+                ),
+            )
+        old._conn.execute(
+            "INSERT INTO quarantine (id, source, company, title_raw, reason, matched_phrase, "
+            "feed_summary, verified_description, first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "hanzili:4",
+                "hanzili",
+                "Acme",
+                "Intern",
+                "out-of-scope-degree",
+                "PhD",
+                "Hybrid",
+                "Verified PhD required",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old.close()
+    upgraded = SqliteRepository.connect(db_path)
+    try:
+        rows = upgraded._conn.execute(
+            "SELECT id, feed_summary, rejection_evidence FROM quarantine ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("hanzili:1", "PhD required", "PhD required"),
+            ("hanzili:2", "PhD required", ""),
+            ("hanzili:3", "", ""),
+            ("hanzili:4", "Hybrid", "Verified PhD required"),
+        ]
+    finally:
+        upgraded.close()
+
+
+def test_version_six_upgrade_preserves_oracle_provenance_career_and_queue_state(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.domain import JobLevel, RoleCategory
+    from stage.storage import migrations
+
+    shipped = migrations.discover()
+    ident = "oracle_cloud:acme:verified"
+    when = "2026-11-18T12:00:00+00:00"
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: tuple(m for m in shipped if m.version <= 6))
+        old = SqliteRepository.connect(db_path)
+        try:
+            old._conn.execute(
+                "INSERT INTO jobs (id, source, company, title_raw, title_normalized, "
+                "apply_url_raw, description, role, roles, level, work_auth_flag, "
+                "work_auth_known, first_seen, "
+                "last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ident,
+                    "oracle_cloud",
+                    "Acme",
+                    "Senior Finance Analyst",
+                    "senior finance analyst",
+                    "https://example.com/1",
+                    "Verified full detail",
+                    "finance",
+                    '["finance"]',
+                    "senior",
+                    1,
+                    1,
+                    when,
+                    when,
+                ),
+            )
+            old._conn.execute("INSERT INTO oracle_full_details (id) VALUES (?)", (ident,))
+            old._conn.execute(
+                "INSERT INTO detail_fetches (id, source, fetched_at, resolved, failed) "
+                "VALUES (?, ?, ?, 1, 0)",
+                (ident, "oracle_cloud", when),
+            )
+            old._conn.execute(
+                "INSERT INTO detail_queue_cursors (source, cursor) VALUES (?, ?)",
+                ("oracle_cloud:acme", ident),
+            )
+            old._conn.execute(
+                "INSERT INTO quarantine (id, source, company, title_raw, reason, matched_phrase, "
+                "first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "bamboohr:acme:held",
+                    "bamboohr",
+                    "Acme",
+                    "Engineer Intern",
+                    "out-of-scope-degree",
+                    "PhD required",
+                    when,
+                    when,
+                ),
+            )
+        finally:
+            old.close()
+    repo = SqliteRepository.connect(db_path)
+    try:
+        stored = repo.get_job(ident)
+        assert stored is not None and stored.description == "Verified full detail"
+        assert stored.role is RoleCategory.FINANCE and stored.roles == (RoleCategory.FINANCE,)
+        assert stored.level is JobLevel.SENIOR and stored.work_auth_flag is True
+        assert stored.feed_summary == ""
+        assert repo._conn.execute("SELECT id FROM oracle_full_details").fetchone()[0] == ident
+        assert repo._conn.execute("SELECT cursor FROM detail_queue_cursors").fetchone()[0] == ident
+        held = repo._conn.execute(
+            "SELECT matched_phrase, feed_summary, verified_description, rejection_evidence "
+            "FROM quarantine WHERE id = ?",
+            ("bamboohr:acme:held",),
+        ).fetchone()
+        assert tuple(held) == ("PhD required", "", "", "")
+        assert applied_versions(repo._conn) == tuple(range(1, 10))
+        assert repo._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert migrations.migrate(repo._conn, db_path) == ()
+    finally:
+        repo.close()
+
+
+def test_unverified_quarantine_migration_preserves_existing_evidence(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stage.storage import migrations
+
+    shipped = migrations.discover()
+    with monkeypatch.context() as patch:
+        patch.setattr(migrations, "discover", lambda: tuple(m for m in shipped if m.version < 9))
+        old = SqliteRepository.connect(db_path)
+        old._conn.execute(
+            "INSERT INTO quarantine (id, source, company, title_raw, reason, matched_phrase, "
+            "feed_summary, verified_description, rejection_evidence, first_seen, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "hanzili:1",
+                "hanzili",
+                "Acme",
+                "Intern",
+                "out-of-scope-degree",
+                "PhD",
+                "Current summary",
+                "Verified body",
+                "PhD required",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+            ),
+        )
+        old.close()
+    upgraded = SqliteRepository.connect(db_path)
+    try:
+        row = upgraded._conn.execute(
+            "SELECT feed_summary, verified_description, rejection_evidence, "
+            "unverified_description FROM quarantine WHERE id = ?",
+            ("hanzili:1",),
+        ).fetchone()
+        assert row is not None and tuple(row) == (
+            "Current summary",
+            "Verified body",
+            "PhD required",
+            "",
+        )
+    finally:
+        upgraded.close()

@@ -1,11 +1,29 @@
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Collection, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 
+from stage.domain.visits import (
+    FEED_DECISION_PREFIX,
+    FEED_DETAIL_PREFIX,
+    FEED_PENDING_PREFIX,
+    FEED_REJECTION_PREFIX,
+)
+
 EACH = "(SELECT value FROM json_each(?))"
+
+
+def verified_feed_hold(alias: str) -> str:
+    return (
+        f"(EXISTS (SELECT 1 FROM detail_fetches d WHERE d.id = ? || {alias}.id "
+        "AND d.resolved = 1 AND d.failed = 0) OR "
+        f"({alias}.matched_phrase NOT GLOB 'copy of *' AND NOT EXISTS "
+        f"(SELECT 1 FROM detail_fetches v WHERE v.id = ? || {alias}.id) AND EXISTS "
+        f"(SELECT 1 FROM detail_fetches d WHERE d.id = ? || {alias}.id "
+        "AND d.resolved = 1 AND d.failed = 0)))"
+    )
 
 
 def link_of(alias: str = "") -> str:
@@ -15,6 +33,30 @@ def link_of(alias: str = "") -> str:
 
 def listed[T: (str, int)](values: Iterable[T]) -> str:
     return json.dumps(sorted(set(values)))
+
+
+def feed_marker_snapshot(
+    conn: sqlite3.Connection, ids: Collection[str]
+) -> tuple[tuple[str, str, str, int, int, int], ...]:
+    keys = (
+        prefix + ident
+        for ident in ids
+        for prefix in (
+            FEED_DETAIL_PREFIX,
+            FEED_DECISION_PREFIX,
+            FEED_REJECTION_PREFIX,
+            FEED_PENDING_PREFIX,
+        )
+    )
+    rows = conn.execute(
+        f"SELECT id, source, fetched_at, resolved, attempts, failed "
+        f"FROM detail_fetches WHERE id IN {EACH} ORDER BY id",
+        (listed(keys),),
+    )
+    return tuple(
+        (str(row[0]), str(row[1]), str(row[2]), int(row[3]), int(row[4]), int(row[5]))
+        for row in rows
+    )
 
 
 def marks(count: int) -> str:

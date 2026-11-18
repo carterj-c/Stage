@@ -72,7 +72,7 @@ async def test_a_full_sync_checks_a_lists_dead_link_and_closes_it(tmp_path: Path
         checked = _routes(router)
         finished, requests = await _run(tmp_path / "stage.db", None)
 
-    assert checked.call_count == 1
+    assert checked.call_count == 2
     assert (finished.checked, finished.checked_gone) == (1, 1)
     assert finished.closed >= 1
     assert any(record.url.startswith(f"{GH}/acme/jobs/") for record in requests)
@@ -86,5 +86,5 @@ async def test_a_sync_of_chosen_sources_checks_nothing(tmp_path: Path) -> None:
         checked = _routes(router)
         finished, _ = await _run(tmp_path / "stage.db", ["simplify"])
 
-    assert checked.call_count == 0
+    assert checked.call_count == 1
     assert finished.checked == 0
