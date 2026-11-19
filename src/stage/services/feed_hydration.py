@@ -115,25 +115,26 @@ async def hydrate_feeds(
             ):
                 break
             target = target_for_url(job.apply_url_raw)
+            if target is None:
+                continue
             detail = None
-            if target is not None:
-                host = next(iter(target.hosts))
-                if host in blocked:
+            host = next(iter(target.hosts))
+            if host in blocked:
+                continue
+            before = client.request_count
+            try:
+                detail = await asyncio.wait_for(
+                    fetch_target(target, client),
+                    max(0.001, deadline - time.monotonic()),
+                )
+            except RequestRefusedError:
+                blocked.add(host)
+                if client.request_count == before:
                     continue
-                before = client.request_count
-                try:
-                    detail = await asyncio.wait_for(
-                        fetch_target(target, client),
-                        max(0.001, deadline - time.monotonic()),
-                    )
-                except RequestRefusedError:
-                    blocked.add(host)
-                    if client.request_count == before:
-                        continue
-                except (HttpError, httpx.HTTPError, TimeoutError):
-                    pass
-                finally:
-                    requests.extend(client.drain_requests(job.source))
+            except (HttpError, httpx.HTTPError, TimeoutError):
+                pass
+            finally:
+                requests.extend(client.drain_requests(job.source))
             attempted += 1
             if isinstance(candidate, QuarantinedJob):
                 pending_expected.setdefault(job.source, []).append(candidate)
