@@ -267,7 +267,30 @@ async def test_unsupported_never_resolves_or_fetches(db_path: Path) -> None:
         await seed(repo, replace(job(), apply_url_raw="https://evil.test/job"))
         result = await hydrate(repo)
     assert not result.requests
-    assert attempt(db_path) == (0, 1, 1)
+    assert attempt(db_path) is None
+
+
+@respx.mock
+async def test_unsupported_links_do_not_consume_detail_budget(db_path: Path) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        number = int(request.url.path.rsplit("/", 1)[1])
+        return httpx.Response(200, json=payload(number))
+
+    route = respx.route(host="boards-api.greenhouse.io").mock(side_effect=respond)
+    unsupported = [
+        replace(job(number), apply_url_raw=f"https://example.test/jobs/{number}")
+        for number in range(100, 165)
+    ]
+    supported = [
+        replace(job(number), first_seen=NOW - timedelta(days=3)) for number in range(900, 940)
+    ]
+    async with open_repository(db_path) as repo:
+        await seed(repo, *unsupported, *supported)
+        result = await hydrate(repo)
+    assert route.call_count == 30
+    assert len(result.requests) == 30
+    assert sum(batch.updated for batch in result.batches) == 30
+    assert all(attempt(db_path, number) is None for number in range(100, 165))
 
 
 @respx.mock
